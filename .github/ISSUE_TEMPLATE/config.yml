@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security reports
+    url: https://github.com/muhamadjawdatsalemalakoum/kith/security/policy
+    about: Please report security issues through the private security policy path.
+  - name: Roadmap
+    url: https://github.com/muhamadjawdatsalemalakoum/kith/blob/main/ROADMAP.md
+    about: Check planned work before opening a broad feature request.

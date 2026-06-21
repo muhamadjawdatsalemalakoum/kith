@@ -1,0 +1,20 @@
+[package]
+name = "mesh-mcp"
+description = "Local MCP (Model Context Protocol) host for centralTabs apps: implement one trait and your app's data + actions become AI-agent-accessible — no server, over the private mesh."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true

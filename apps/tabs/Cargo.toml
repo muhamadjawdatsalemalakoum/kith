@@ -1,0 +1,27 @@
+[package]
+name = "centraltabs"
+description = "centralTabs — your tabs, end-to-end encrypted across your desktops, on the mesh-engine substrate."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+# An app speaks the engine + (optionally) the MCP layer. It never depends on
+# iroh/automerge directly — it uses the engine's re-exported `automerge` so the
+# whole family shares one version.
+mesh-engine = { path = "../../mesh-engine" }
+mesh-mcp = { path = "../../mesh-mcp" }
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }

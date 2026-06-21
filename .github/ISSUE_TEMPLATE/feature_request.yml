@@ -1,0 +1,47 @@
+name: Feature request
+description: Suggest a new capability or improvement for Kith.
+title: "Feature: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the user need and the expected behavior. A narrow, concrete request is easier to evaluate.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - agent-memory
+        - centraltabs
+        - mesh-engine
+        - mesh-mcp
+        - CI or packaging
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user need or technical limitation should this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the behavior or API you would like to see.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Note any workaround or alternate design you considered.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add examples, related issues, or implementation notes if useful.

@@ -1,0 +1,49 @@
+[package]
+name = "mesh-engine"
+description = "The serverless, end-to-end-encrypted, flat-mesh P2P engine — the shared substrate the centralTabs family of apps runs on."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[features]
+# Test-only: exposes iroh's in-process relay (`iroh::test_utils::run_relay_server`)
+# for single-machine relay-path tests. Never compiled into shipped builds.
+test-utils = []
+
+[dependencies]
+iroh.workspace = true
+iroh-mainline-address-lookup.workspace = true
+iroh-blobs.workspace = true
+automerge.workspace = true
+spake2.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+chacha20poly1305.workspace = true
+subtle.workspace = true
+n0-future.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }
+# Gives integration tests `iroh::test_utils::run_relay_server` (in-process relay).
+iroh = { workspace = true, features = ["test-utils"] }
+
+# Relay-path test only builds under the test-utils feature; all other tests stay
+# feature-free (mirrors Dropwire's tests/relay.rs convention).
+[[test]]
+name = "relay"
+path = "tests/relay.rs"
+required-features = ["test-utils"]

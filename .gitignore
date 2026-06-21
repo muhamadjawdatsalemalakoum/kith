@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Local node identity + data dirs (never commit secrets / per-device state)
+*.key
+/data
+/.scratch
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,116 @@
+name: Release
+
+# Builds the agent-memory binary for every desktop target, packages it with the
+# docs + licenses, computes checksums, and drafts a GitHub Release.
+#
+# Triggered by pushing a version tag (e.g. `v0.1.0`), or run manually from the
+# Actions tab. Code signing / macOS notarization / store submission are manual
+# (see ROADMAP.md, M5). The release is left as a DRAFT — you review and publish.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN: agent-memory
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  label: linux-x86_64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    label: windows-x86_64 }
+          - { os: macos-latest,   target: aarch64-apple-darwin,      label: macos-aarch64 }
+          - { os: macos-latest,   target: x86_64-apple-darwin,       label: macos-x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release -p agent-memory --target ${{ matrix.target }}
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="kith-${BIN}-${{ steps.ver.outputs.version }}-${{ matrix.label }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/${BIN}" "dist/$name/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          cp apps/memory/README.md "dist/$name/AGENT-MEMORY.md"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "kith-$env:BIN-${{ steps.ver.outputs.version }}-${{ matrix.label }}"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/$env:BIN.exe" "dist/$name/"
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE "dist/$name/"
+          Copy-Item apps/memory/README.md "dist/$name/AGENT-MEMORY.md"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          $h = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$h  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kith-${{ matrix.label }}
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+
+  release:
+    name: draft release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256

@@ -1,0 +1,29 @@
+[package]
+name = "agent-memory"
+description = "Your AI memory, on your own machines — portable, vendor-neutral agent memory that syncs across your devices over the mesh and is readable by any agent via MCP. No account, no cloud, end-to-end encrypted."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+mesh-engine = { path = "../../mesh-engine" }
+mesh-mcp = { path = "../../mesh-mcp" }
+serde_json.workspace = true
+uuid.workspace = true
+# For the binary (the MCP server + CLI).
+tokio.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }
