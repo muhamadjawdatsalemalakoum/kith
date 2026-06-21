@@ -1,7 +1,13 @@
-# Kith
+<p align="center">
+  <img src="assets/brand/kith-readme-banner-1280x640.png" alt="Kith — your circle of devices, in sync" width="820">
+</p>
 
-[![CI](https://github.com/muhamadjawdatsalemalakoum/kith/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/muhamadjawdatsalemalakoum/kith/actions/workflows/ci.yml)
-[![Release](https://github.com/muhamadjawdatsalemalakoum/kith/actions/workflows/release.yml/badge.svg)](https://github.com/muhamadjawdatsalemalakoum/kith/actions/workflows/release.yml)
+<p align="center">
+  <a href="https://github.com/muhamadjawdatsalemalakoum/kith/actions/workflows/ci.yml"><img src="https://github.com/muhamadjawdatsalemalakoum/kith/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/muhamadjawdatsalemalakoum/kith/actions/workflows/release.yml"><img src="https://github.com/muhamadjawdatsalemalakoum/kith/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+  <img src="https://img.shields.io/badge/status-alpha-orange" alt="Status: alpha">
+  <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
+</p>
 
 > *kith* — one's own trusted circle. **Kith** keeps your circle of devices in sync.
 
