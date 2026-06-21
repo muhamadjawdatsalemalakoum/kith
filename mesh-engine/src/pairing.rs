@@ -17,7 +17,7 @@ use spake2::{Ed25519Group, Identity, Password, Spake2};
 type HmacSha256 = Hmac<Sha256>;
 
 /// Domain-separation label mixed into every pairing.
-const PAIRING_ID: &[u8] = b"centraltabs mesh pairing v1";
+const PAIRING_ID: &[u8] = b"kith mesh pairing v1";
 
 /// In-progress pairing state plus this side's outbound message.
 pub struct Pairing {
@@ -54,7 +54,7 @@ pub fn finish(pairing: Pairing, inbound: &[u8]) -> Result<[u8; 32], spake2::Erro
 pub fn confirm_tag(key: &[u8; 32]) -> [u8; 32] {
     let mut mac =
         <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts a key of any length");
-    mac.update(b"centraltabs confirm v1");
+    mac.update(b"kith confirm v1");
     let out = mac.finalize().into_bytes();
     let mut tag = [0u8; 32];
     tag.copy_from_slice(&out);

@@ -8,16 +8,30 @@ use std::path::PathBuf;
 
 use agent_memory::{Memory, MeshConfig};
 
-/// Where this device stores its identity + replica. Override with
-/// `CENTRALTABS_MEMORY_DIR`; defaults to `~/.centraltabs/memory`.
+/// Where this device stores its identity + replica. Override with `KITH_MEMORY_DIR`;
+/// defaults to `~/.kith/memory`. The legacy `CENTRALTABS_MEMORY_DIR` variable and the
+/// `~/.centraltabs/memory` location are still honored so existing data keeps working.
 fn data_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("KITH_MEMORY_DIR") {
+        return PathBuf::from(d);
+    }
     if let Ok(d) = std::env::var("CENTRALTABS_MEMORY_DIR") {
         return PathBuf::from(d);
     }
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".centraltabs").join("memory")
+    let home = PathBuf::from(
+        std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| ".".to_string()),
+    );
+    let current = home.join(".kith").join("memory");
+    let legacy = home.join(".centraltabs").join("memory");
+    // Prefer the current location, but keep using a pre-existing legacy dir if
+    // that's the only one present, so an upgrade doesn't lose synced data.
+    if !current.exists() && legacy.exists() {
+        legacy
+    } else {
+        current
+    }
 }
 
 #[tokio::main]

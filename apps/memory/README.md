@@ -50,7 +50,9 @@ agent-memory recall "rust"
 agent-memory id
 ```
 
-State lives in `~/.centraltabs/memory` (override with `CENTRALTABS_MEMORY_DIR`).
+State lives in `~/.kith/memory` (override with `KITH_MEMORY_DIR`). A pre-existing
+`~/.centraltabs/memory` directory and the legacy `CENTRALTABS_MEMORY_DIR` variable are
+still honored, so upgrading keeps your synced data.
 
 ## Status / honesty
 
