@@ -18,6 +18,15 @@ Versioning.
 - Cross-platform installer pipeline (tauri-action) and a CI job that builds + lints the
   desktop app on all three OSes.
 
+- **Per-device sync status** — the engine tracks each peer's last successful sync; the
+  Devices view shows "synced N ago" and the status light reflects real recency.
+- **Transfer history** — a local "Recent transfers" list in Files (sent/received, size,
+  peer, time, open-location).
+- **Settings** (download folder + data-dir reveal), first-run **onboarding**,
+  **window-state** persistence, and crash logging to `kith.log`.
+- Download **cancel**, and a **Reset & re-key** action that rotates the group key so
+  removed devices can no longer sync.
+
 ### Changed
 
 - **Blob transfer is now group-key gated** (mutual HMAC), matching document sync — a
@@ -25,6 +34,8 @@ Versioning.
 - **Pairing is now mutual**: the host learns the joiner's identity and peers back, so
   both sides converge (not just the joiner dialing the host).
 - Engine peer set deduplicates and supports removal (cancellable per-peer sync tasks).
+- Offers survive a restart (re-served from the local path); downloads never overwrite an
+  existing file (auto-disambiguated); at-rest/group key files are hardened on Windows too.
 
 ## [0.0.1] - 2026-06-21
 

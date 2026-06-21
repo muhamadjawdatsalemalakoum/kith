@@ -111,6 +111,9 @@ a{color:var(--teal); text-underline-offset:2px}
 .net-dot.off{background:var(--faint);box-shadow:none;animation:none;opacity:.45}
 @keyframes breathe{0%,100%{opacity:.5}50%{opacity:1}}
 
+/* recent transfers header */
+.hist-head{display:flex;align-items:center;justify-content:space-between;margin:var(--sp-6) 0 var(--sp-3)}
+
 /* settings rows */
 .setting{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0;border-bottom:1px solid var(--line-soft)}
 .set-row{min-width:0}

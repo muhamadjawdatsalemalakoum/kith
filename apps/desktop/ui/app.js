@@ -19,7 +19,7 @@ let demoNotes = [
   { id: "n4", text: "Gift idea for Sam — the blue scarf she liked", kind: "idea" },
   { id: "n5", text: "Dr. Reyes (clinic): 0412 555 209", kind: "fact" },
 ];
-let demoDevices = [{ id: "a2f9c7e1b4d8", name: "Home desktop" }];
+let demoDevices = [{ id: "a2f9c7e1b4d8", name: "Home desktop", synced_ago: 14 }];
 let demoTabs = [
   { id: "t1", url: "https://github.com/muhamadjawdatsalemalakoum/kith", title: "Kith on GitHub" },
   { id: "t2", url: "https://automerge.org", title: "Automerge — the CRDT behind Kith" },
@@ -43,7 +43,7 @@ async function mockInvoke(cmd, args = {}) {
     case "forget_note": { demoNotes = demoNotes.filter((n) => n.id !== args.id); return true; }
     case "start_link": return { invite: DEMO_ID + ":K7P29QXM" };
     case "cancel_link": return null;
-    case "poll_pairing": { demoLinkPolls++; if (demoLinkPolls >= 3) { demoLinkPolls = 0; const d = { id: "c9f1a2b3d4e5", name: "Linked device" }; demoDevices.push(d); return d; } return null; }
+    case "poll_pairing": { demoLinkPolls++; if (demoLinkPolls >= 3) { demoLinkPolls = 0; const d = { id: "c9f1a2b3d4e5", name: "Linked device", synced_ago: 1 }; demoDevices.push(d); return d; } return null; }
     case "join_link": { const d = { id: "b5e1d3a7f902", name: (args.name && args.name.trim()) || "Linked device" }; demoDevices.push(d); return d; }
     case "list_devices": return { me: { id: DEMO_ID, name: "This laptop" }, linked: demoDevices.slice() };
     case "rename_device": { const d = demoDevices.find((x) => x.id === args.id); if (d) d.name = args.name; return null; }
@@ -85,6 +85,11 @@ async function mockInvoke(cmd, args = {}) {
       return null;
     }
     case "cancel_download": { demoCancelled.add(args.id); return null; }
+    case "list_history": { const now = Math.floor(Date.now() / 1000); return [
+      { id: "h1", name: "Resume.pdf", size: 182 * 1024, direction: "sent", peer: "Your devices", ts: now - 120, path: "C:\\Users\\You\\Documents\\Resume.pdf" },
+      { id: "h2", name: "Family photos.zip", size: 248 * 1024 * 1024, direction: "received", peer: "Home desktop", ts: now - 5400, path: "C:\\Users\\You\\Downloads\\Kith\\Family photos.zip" },
+    ]; }
+    case "clear_history": return null;
     case "get_settings": return { data_dir: "C:\\Users\\You\\.kith\\memory", download_dir: "C:\\Users\\You\\Downloads\\Kith" };
     case "set_download_dir": return "C:\\Users\\You\\Downloads";
     case "reveal_path": return null;
@@ -431,6 +436,7 @@ async function renameFile(f) {
 }
 async function loadFiles() {
   try { renderFiles(await invoke("list_files")); } catch (e) { /* starting */ }
+  loadHistory();
 }
 async function offerFile() {
   try {
@@ -486,6 +492,44 @@ function startDownload(f, el, action) {
 }
 $("#file-share").addEventListener("click", offerFile);
 
+/* recent transfers (local history) */
+const HIST_UP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V6M6 12l6-6 6 6"/></svg>';
+const HIST_DOWN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v14M6 12l6 6 6-6"/></svg>';
+function renderHistory(items) {
+  const list = $("#history-list"), head = $("#history-head");
+  list.innerHTML = "";
+  if (!items || !items.length) { head.classList.add("hidden"); return; }
+  head.classList.remove("hidden");
+  const now = Math.floor(Date.now() / 1000);
+  items.forEach((h) => {
+    const el = document.createElement("div");
+    el.className = "note";
+    const av = document.createElement("div");
+    av.className = "dev-avatar";
+    av.innerHTML = h.direction === "sent" ? HIST_UP : HIST_DOWN;
+    const body = document.createElement("div");
+    body.className = "note-body";
+    const name = document.createElement("div");
+    name.className = "note-text";
+    name.textContent = h.name;
+    const meta = document.createElement("div");
+    meta.className = "dev-meta";
+    meta.style.fontFamily = "var(--font)";
+    const dir = h.direction === "sent" ? "Sent · to " + h.peer : "Received · from " + h.peer;
+    meta.textContent = dir + " · " + fmtBytes(h.size) + " · " + fmtAgo(Math.max(0, now - h.ts));
+    body.append(name, meta);
+    el.append(av, body);
+    if (h.path) el.append(fileBtn("open", "Open location", () => invoke("reveal_path", { path: h.path }).catch(() => {})));
+    list.appendChild(el);
+  });
+}
+async function loadHistory() {
+  try { renderHistory(await invoke("list_history")); } catch (_) {}
+}
+if ($("#history-clear")) $("#history-clear").addEventListener("click", async () => {
+  try { await invoke("clear_history"); loadHistory(); } catch (_) {}
+});
+
 /* -------------------------------- devices ------------------------------- */
 const DEV_ICON ='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>';
 function shortId(id) { return id ? id.slice(0, 10) + "…" + id.slice(-6) : ""; }
@@ -495,16 +539,29 @@ async function loadDevices() {
     const d = await invoke("list_devices");
     renderMe(d.me);
     renderLinked(d.linked || []);
-    setNetDot((d.linked || []).length);
+    setNetDot(d.linked || []);
   } catch (e) { /* starting */ }
 }
-// Honest status light: lit only when you actually have linked devices.
-function setNetDot(linkedCount) {
+function fmtAgo(secs) {
+  if (secs == null) return "";
+  if (secs < 10) return "just now";
+  if (secs < 60) return secs + "s ago";
+  if (secs < 3600) return Math.floor(secs / 60) + "m ago";
+  if (secs < 86400) return Math.floor(secs / 3600) + "h ago";
+  return Math.floor(secs / 86400) + "d ago";
+}
+// Honest status light: lit (live) only when a device actually synced recently.
+function setNetDot(linked) {
   const dot = $(".net-dot");
   if (!dot) return;
-  if (linkedCount > 0) {
+  const arr = linked || [];
+  const recent = arr.some((d) => d.synced_ago != null && d.synced_ago < 90);
+  if (recent) {
     dot.classList.remove("off");
-    dot.title = linkedCount + " device" + (linkedCount === 1 ? "" : "s") + " linked";
+    dot.title = "In sync with your devices";
+  } else if (arr.length > 0) {
+    dot.classList.add("off");
+    dot.title = "Linked devices, but not synced recently";
   } else {
     dot.classList.add("off");
     dot.title = "No other devices linked yet";
@@ -546,7 +603,8 @@ function renderLinked(list) {
         <button class="btn-quiet js-unlink">Unlink</button>
       </div>`;
     el.querySelector(".dev-name").textContent = dev.name;
-    el.querySelector(".dev-meta").textContent = shortId(dev.id);
+    const sync = dev.synced_ago != null ? "synced " + fmtAgo(dev.synced_ago) : "not synced yet";
+    el.querySelector(".dev-meta").textContent = sync + " · " + shortId(dev.id);
     el.querySelector(".dev-meta").title = dev.id;
     el.querySelector(".js-rename").addEventListener("click", async () => {
       const name = prompt("Rename this device", dev.name);
@@ -725,7 +783,7 @@ $("#welcome-modal").addEventListener("click", (e) => { if (e.target.id === "welc
   refreshNotes();
   try { const v = await invoke("app_version"); $("#app-version").textContent = "v" + v; } catch (_) {}
   try { const id = await invoke("my_endpoint_id"); $("#about-id").textContent = id; $("#about-id").title = id; } catch (_) {}
-  try { const d = await invoke("list_devices"); setNetDot((d.linked || []).length); } catch (_) {}
+  try { const d = await invoke("list_devices"); setNetDot(d.linked || []); } catch (_) {}
   maybeOnboard();
   // Light periodic refresh so notes synced from other devices appear.
   setInterval(() => { if (curView === "notes" && document.hasFocus() && $("#link-modal").classList.contains("hidden") && $("#join-modal").classList.contains("hidden")) refreshNotes(); }, 3500);

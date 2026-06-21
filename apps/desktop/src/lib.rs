@@ -110,6 +110,22 @@ struct Device {
     name: String,
 }
 
+/// One completed transfer, recorded locally for the Files "Recent" list.
+#[derive(Serialize, Deserialize, Clone)]
+struct HistoryEntry {
+    id: String,
+    name: String,
+    size: u64,
+    /// "sent" (you offered it) or "received" (you downloaded it).
+    direction: String,
+    /// "Your devices" for a send, or the offering device's name for a receive.
+    peer: String,
+    /// Unix seconds when it was recorded.
+    ts: u64,
+    /// Local path, if the bytes are on this machine.
+    path: Option<String>,
+}
+
 /// The "add a device" payload shown on the host: a copyable invite the other
 /// computer pastes into "Enter a code".
 #[derive(Serialize)]
@@ -117,10 +133,19 @@ struct LinkInfo {
     invite: String,
 }
 
+/// A linked device for the UI, with sync recency (`synced_ago` = seconds since the
+/// last successful sync, `None` = not yet synced this session).
+#[derive(Serialize)]
+struct LinkedDevice {
+    id: String,
+    name: String,
+    synced_ago: Option<u64>,
+}
+
 #[derive(Serialize)]
 struct DevicesDto {
     me: Device,
-    linked: Vec<Device>,
+    linked: Vec<LinkedDevice>,
 }
 
 /// What an AI assistant can do with Kith over MCP (shown on the Agents screen).
@@ -258,6 +283,32 @@ fn map_insert(dir: &Path, file: &str, key: &str, value: &str) {
     m.insert(key.to_string(), value.to_string());
     if let Ok(j) = serde_json::to_vec_pretty(&m) {
         let _ = std::fs::write(dir.join(file), j);
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn load_history(dir: &Path) -> Vec<HistoryEntry> {
+    std::fs::read(dir.join("history.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+/// Append a completed transfer to the local history log (capped, oldest dropped).
+fn append_history(dir: &Path, entry: HistoryEntry) {
+    let mut h = load_history(dir);
+    h.push(entry);
+    let n = h.len();
+    if n > 200 {
+        h.drain(0..n - 200);
+    }
+    if let Ok(j) = serde_json::to_vec_pretty(&h) {
+        let _ = std::fs::write(dir.join("history.json"), j);
     }
 }
 
@@ -434,6 +485,18 @@ async fn offer_file(app: AppHandle, state: State<'_, AppState>) -> Result<Option
     let e = files.offer(&path).await.map_err(|e| e.to_string())?;
     let local_path = path.to_string_lossy().into_owned();
     map_insert(&state.data_dir, "offered_paths.json", &e.id, &local_path);
+    append_history(
+        &state.data_dir,
+        HistoryEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: e.name.clone(),
+            size: e.size,
+            direction: "sent".into(),
+            peer: "Your devices".into(),
+            ts: now_secs(),
+            path: Some(local_path.clone()),
+        },
+    );
     Ok(Some(FileDto {
         mine: e.from_id == me,
         local_path: Some(local_path),
@@ -515,6 +578,18 @@ async fn download_file(
         Some(Ok(path)) => {
             let ps = path.to_string_lossy().into_owned();
             map_insert(&state.data_dir, "downloads.json", &id, &ps);
+            append_history(
+                &state.data_dir,
+                HistoryEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: entry.name.clone(),
+                    size: entry.size,
+                    direction: "received".into(),
+                    peer: entry.from_name.clone(),
+                    ts: now_secs(),
+                    path: Some(ps.clone()),
+                },
+            );
             let _ = on_event.send(DlEvent::Done { path: ps });
             Ok(())
         }
@@ -683,10 +758,16 @@ async fn list_devices(state: State<'_, AppState>) -> Result<DevicesDto, String> 
         id: mesh.endpoint_id(),
         name: this_device_name(),
     };
-    Ok(DevicesDto {
-        me,
-        linked: load_devices(&state.data_dir),
-    })
+    let ages = mesh.last_sync_ages();
+    let linked = load_devices(&state.data_dir)
+        .into_iter()
+        .map(|d| LinkedDevice {
+            synced_ago: ages.get(&d.id).copied(),
+            id: d.id,
+            name: d.name,
+        })
+        .collect();
+    Ok(DevicesDto { me, linked })
 }
 
 #[tauri::command]
@@ -809,6 +890,20 @@ async fn set_download_dir(
     let s = path.to_string_lossy().into_owned();
     map_insert(&state.data_dir, "settings.json", "download_dir", &s);
     Ok(Some(s))
+}
+
+// ----------------------------------------------------------------- transfer history
+
+#[tauri::command]
+fn list_history(state: State<'_, AppState>) -> Vec<HistoryEntry> {
+    let mut h = load_history(&state.data_dir);
+    h.reverse(); // newest first
+    h
+}
+
+#[tauri::command]
+fn clear_history(state: State<'_, AppState>) {
+    let _ = std::fs::write(state.data_dir.join("history.json"), b"[]");
 }
 
 // ----------------------------------------------------------------- MCP serve mode
@@ -1072,7 +1167,9 @@ pub fn run() {
             reveal_path,
             open_external,
             get_settings,
-            set_download_dir
+            set_download_dir,
+            list_history,
+            clear_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kith");

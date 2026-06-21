@@ -108,6 +108,23 @@ Order matters; the first image is the thumbnail. Aim for 1280×800, dark theme.
 
 ---
 
+## 4b. Demo-GIF storyboard (the single best gallery asset)
+
+A 10–15s loop, two windows side by side (or one window, fast cuts). Record at the app's
+default size, dark theme; trim to a tight loop.
+
+1. **(0–3s)** Left window on **Devices → Link a device** showing the code. Right window
+   on **Enter a code** — paste, click *Link devices*.
+2. **(3–6s)** Both windows flip to **Memory**. Type a note on the left ("Wi-Fi password is
+   sunflower42") → it appears on the right a beat later. *(the "wow" moment)*
+3. **(6–10s)** Left → **Files → Share a file**; right shows it appear and a **Download**
+   with the progress bar + "direct" badge filling.
+4. **(10–13s)** Cut to **Agents** — the MCP config + tool list, captioned "your AI can use
+   it too." Hold on the tagline frame.
+
+Export ≤ 5 MB if possible (PH compresses). Name it `kith-demo.gif`; you can also drop it in
+`www/` and embed it on the landing page.
+
 ## 5. Distribution (your channels — optional but high-leverage)
 
 - Post from your own **LinkedIn** (https://www.linkedin.com/in/akoum/) and any dev

@@ -96,6 +96,9 @@ struct Inner {
     /// Set to the endpoint id of a device that just paired in (host side), so the
     /// app can show + persist it. Drained by [`Mesh::take_joined`].
     pair_joined: Arc<std::sync::Mutex<Option<String>>>,
+    /// When each peer last completed a successful sync round — powers the UI's
+    /// per-device "synced N ago" / live status.
+    last_sync: std::sync::Mutex<std::collections::HashMap<iroh::EndpointId, std::time::SystemTime>>,
     /// Stops the background loop on shutdown.
     cancel: CancellationToken,
 }
@@ -175,6 +178,7 @@ impl Mesh {
             group_key,
             pair_armed,
             pair_joined,
+            last_sync: std::sync::Mutex::new(std::collections::HashMap::new()),
             cancel: CancellationToken::new(),
         });
 
@@ -212,6 +216,26 @@ impl Mesh {
     /// engine has already added it as a sync peer; this is for the app to show + persist.
     pub fn take_joined(&self) -> Option<String> {
         self.inner.pair_joined.lock().expect("joined lock").take()
+    }
+
+    /// For each peer that has ever completed a sync, the seconds since that last
+    /// successful round (keyed by endpoint-id string). Powers per-device sync status.
+    pub fn last_sync_ages(&self) -> std::collections::HashMap<String, u64> {
+        let now = std::time::SystemTime::now();
+        self.inner
+            .last_sync
+            .lock()
+            .map(|m| {
+                m.iter()
+                    .map(|(id, t)| {
+                        (
+                            id.to_string(),
+                            now.duration_since(*t).map(|d| d.as_secs()).unwrap_or(0),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Join the group hosted by `host` using the shared short `code`: run the SPAKE2
@@ -481,6 +505,7 @@ async fn peer_sync_task(inner: Arc<Inner>, peer: EndpointAddr, token: Cancellati
 /// Dial a peer and drive one initiator-side sync round, bounded by timeouts so an
 /// unreachable/slow peer fails cleanly instead of hanging.
 async fn sync_peer(inner: &Arc<Inner>, peer: EndpointAddr) -> Result<()> {
+    let peer_id = peer.id;
     let connect = inner.router.endpoint().connect(peer, MESH_ALPN);
     let conn = tokio::time::timeout(CONNECT_TIMEOUT, connect)
         .await
@@ -491,6 +516,10 @@ async fn sync_peer(inner: &Arc<Inner>, peer: EndpointAddr) -> Result<()> {
         .await
         .map_err(|_| CoreError::Sync("sync round timed out".into()))?
         .map_err(|e| CoreError::Sync(e.to_string()))?;
+    // Record a successful round so the UI can show per-device sync recency.
+    if let Ok(mut m) = inner.last_sync.lock() {
+        m.insert(peer_id, std::time::SystemTime::now());
+    }
     Ok(())
 }
 
