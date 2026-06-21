@@ -1,0 +1,26 @@
+[package]
+name = "kith-files"
+description = "Kith file sharing — your files across your own devices, on the mesh blob primitive."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+mesh-engine = { path = "../../mesh-engine" }
+mesh-mcp = { path = "../../mesh-mcp" }
+serde_json.workspace = true
+anyhow.workspace = true
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }

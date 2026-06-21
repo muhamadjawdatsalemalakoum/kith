@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Kith</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- ================================ rail ================================ -->
+    <nav class="rail" aria-label="Main">
+      <svg class="brand-mark" viewBox="0 0 48 48" fill="none" aria-label="Kith" role="img">
+        <circle cx="24" cy="24" r="20" stroke="var(--teal)" stroke-width="1.4" opacity=".35"/>
+        <g stroke="var(--teal)" stroke-width="1.5" opacity=".55">
+          <path d="M24 8 L38 18 L33 35 L15 35 L10 18 Z"/>
+          <path d="M24 8 L33 35 M24 8 L15 35 M38 18 L15 35 M10 18 L33 35"/>
+        </g>
+        <g fill="var(--canvas)" stroke="var(--teal)" stroke-width="2.4">
+          <circle cx="24" cy="8" r="3.4"/><circle cx="38" cy="18" r="3.4"/>
+          <circle cx="33" cy="35" r="3.4"/><circle cx="15" cy="35" r="3.4"/><circle cx="10" cy="18" r="3.4"/>
+        </g>
+        <circle cx="24" cy="8" r="1.5" fill="var(--amber)"/>
+        <circle cx="33" cy="35" r="1.5" fill="var(--amber)"/>
+      </svg>
+
+      <div class="nav">
+        <span class="nav-indicator" aria-hidden="true"></span>
+        <button class="nav-item is-active" data-view="notes" data-tip="Memory" aria-label="Memory">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/><path d="M14 3v5h5M8 13h8M8 17h6"/></svg>
+        </button>
+        <button class="nav-item" data-view="tabs" data-tip="Tabs" aria-label="Tabs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="14" rx="2"/><path d="M3 9h6l1.5-2.5h4L16 9h5"/></svg>
+        </button>
+        <button class="nav-item" data-view="files" data-tip="Files" aria-label="Files">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h6l2 3h4a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/><path d="M12 11v6M9.5 13.5 12 11l2.5 2.5"/></svg>
+        </button>
+        <button class="nav-item" data-view="agents" data-tip="Agents (AI)" aria-label="Agents">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="11" rx="3"/><path d="M12 8V4M9 13h.01M15 13h.01M9 16h6"/><path d="M2 12v3M22 12v3"/></svg>
+        </button>
+        <button class="nav-item" data-view="devices" data-tip="Devices" aria-label="Devices">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.4"/><circle cx="5" cy="18" r="2.4"/><circle cx="19" cy="18" r="2.4"/><path d="M12 7.4v3.6M10.4 12.6 6.4 16M13.6 12.6 17.6 16M12 11h0"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg>
+        </button>
+        <button class="nav-item" data-view="about" data-tip="About" aria-label="About">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h0"/></svg>
+        </button>
+      </div>
+
+      <div class="rail-foot">
+        <span class="net-dot" title="Connected to your circle"></span>
+        <button class="icon-btn" id="theme-toggle" aria-label="Switch theme">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.6 6.6 0 0 0 9.8 9.8Z"/></svg>
+        </button>
+      </div>
+    </nav>
+
+    <!-- ================================ main ================================ -->
+    <main class="main">
+
+      <!-- ----------------------------- Memory ----------------------------- -->
+      <section class="view is-active" id="view-notes">
+        <div class="view-head">
+          <h1>Your memory</h1>
+          <p class="sub">Anything you save here is kept on every device you've linked — no account, nothing in the cloud. Your AI assistants can read and add to it too.</p>
+        </div>
+
+        <div class="panel composer">
+          <textarea id="note-input" placeholder="Remember something… e.g. “Mum's birthday is March 3rd” or “Wi-Fi password is sunflower42”" rows="3"></textarea>
+          <div class="composer-row">
+            <div class="chips" id="note-kinds" role="group" aria-label="Type">
+              <button class="chip on" data-kind="note">Note</button>
+              <button class="chip" data-kind="fact">Fact</button>
+              <button class="chip" data-kind="idea">Idea</button>
+            </div>
+            <button class="btn" id="note-add">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+              Remember
+            </button>
+          </div>
+        </div>
+
+        <div class="searchbar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+          <input id="note-search" type="search" placeholder="Search your memory…" autocomplete="off" />
+        </div>
+
+        <div class="notes" id="notes-list"></div>
+        <div class="empty hidden" id="notes-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/><path d="M14 3v5h5"/></svg>
+          <h3>Nothing remembered yet</h3>
+          <p>Add your first note above. It'll appear here and on every device you link.</p>
+        </div>
+      </section>
+
+      <!-- ------------------------------ Tabs ------------------------------ -->
+      <section class="view" id="view-tabs">
+        <div class="view-head">
+          <h1>Your tabs</h1>
+          <p class="sub">Save links and pages you want on hand everywhere. They sync to every device you've linked — and your AI can save and read them too.</p>
+        </div>
+
+        <div class="panel composer">
+          <input class="input" id="tab-url" type="text" placeholder="Paste a link… e.g. https://example.com" autocomplete="off" spellcheck="false" />
+          <div class="composer-row">
+            <input class="input" id="tab-title" type="text" placeholder="Title (optional)" autocomplete="off" style="flex:1; min-width:0; height:40px" />
+            <button class="btn" id="tab-add">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+              Save tab
+            </button>
+          </div>
+        </div>
+
+        <div class="notes" id="tabs-list" style="margin-top:var(--sp-5)"></div>
+        <div class="empty hidden" id="tabs-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="14" rx="2"/><path d="M3 9h6l1.5-2.5h4L16 9h5"/></svg>
+          <h3>No saved tabs yet</h3>
+          <p>Paste a link above to keep it within reach on all your devices.</p>
+        </div>
+      </section>
+
+      <!-- ------------------------------ Files ----------------------------- -->
+      <section class="view" id="view-files">
+        <div class="view-head">
+          <h1>Your files</h1>
+          <p class="sub">Send files straight to your own devices — end-to-end encrypted, no size limits, no cloud. Keep this window open until the other device has downloaded.</p>
+        </div>
+
+        <div class="dev-cta" style="grid-template-columns:1fr; margin-top:0; margin-bottom:var(--sp-5)">
+          <button class="cta-card" id="file-share" style="flex-direction:row; align-items:center; gap:14px">
+            <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M8 8l4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></span>
+            <span style="text-align:left"><span class="t" style="display:block">Share a file</span><span class="d">Pick a file to offer to your linked devices.</span></span>
+          </button>
+        </div>
+
+        <div class="notes" id="files-list"></div>
+        <div class="empty hidden" id="files-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h6l2 3h4a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/></svg>
+          <h3>No files yet</h3>
+          <p>Share a file above, or link another device to see the files it offers.</p>
+        </div>
+      </section>
+
+      <!-- ----------------------------- Agents ----------------------------- -->
+      <section class="view" id="view-agents">
+        <div class="view-head">
+          <h1>Agents <span style="color:var(--muted); font-weight:500">· connect your AI</span></h1>
+          <p class="sub">Let an AI assistant read and add to your Kith memory — over MCP (Model Context Protocol), running locally on this machine. It uses the <strong>same memory</strong> you see here, with no server in the middle.</p>
+        </div>
+
+        <div class="panel">
+          <p class="section-label" style="margin-top:0">1 · Add Kith to your AI app</p>
+          <p style="color:var(--muted); font-size:14px; margin:0 0 var(--sp-4)">Paste this into your MCP client's config — e.g. Claude Desktop's <span class="mono">claude_desktop_config.json</span>, or Cursor's MCP settings — then restart it.</p>
+          <div class="code-card">
+            <p class="code-label">MCP server config</p>
+            <pre class="code" id="agent-config" style="white-space:pre; overflow-x:auto">…</pre>
+          </div>
+          <div class="sheet-actions" style="justify-content:flex-start; margin-top:var(--sp-4)">
+            <button class="btn" id="agent-copy">Copy config</button>
+            <button class="btn-ghost hidden" id="agent-reveal">Show the server file</button>
+          </div>
+          <p class="form-error" id="agent-binary-warn"></p>
+        </div>
+
+        <p class="section-label">2 · What your AI can do</p>
+        <div class="notes" id="agent-tools"></div>
+
+        <div class="secnote" style="margin-top:var(--sp-5)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v6c0 4 3 6.5 7 9 4-2.5 7-5 7-9V6Z"/><path d="m9 12 2 2 4-4"/></svg>
+          <span>This runs entirely on your computer. Your AI talks to a local Kith process — nothing is sent to a Kith server, because there isn't one.</span>
+        </div>
+      </section>
+
+      <!-- ----------------------------- Devices ---------------------------- -->
+      <section class="view" id="view-devices">
+        <div class="view-head">
+          <h1>Your devices</h1>
+          <p class="sub">Link another computer running Kith — your laptop, desktop, or a family member's. Once linked, your memory stays in sync between them automatically.</p>
+        </div>
+
+        <div class="section-label">This device</div>
+        <div id="me-card"></div>
+
+        <div class="section-label">Linked devices</div>
+        <div id="linked-list"></div>
+        <div class="empty hidden" id="linked-empty" style="padding:32px 24px">
+          <p>No other devices yet. Link one below — it takes about a minute.</p>
+        </div>
+
+        <div class="dev-cta">
+          <button class="cta-card" id="open-link">
+            <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/></svg></span>
+            <span class="t">Link a device</span>
+            <span class="d">Show a code here for your other computer to enter.</span>
+          </button>
+          <button class="cta-card" id="open-join">
+            <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span>
+            <span class="t">Enter a code</span>
+            <span class="d">Got a code from another computer? Paste it here to join.</span>
+          </button>
+        </div>
+
+        <div class="danger-zone">
+          <div>
+            <div class="dz-title">Reset &amp; re-key</div>
+            <div class="dz-sub">Disconnect all devices and change your security key. Removed devices can no longer sync; you'll re-link the ones you keep.</div>
+          </div>
+          <button class="btn-danger" id="leave-group">Reset</button>
+        </div>
+      </section>
+
+      <!-- ------------------------------ About ----------------------------- -->
+      <section class="view" id="view-about">
+        <svg class="about-mark" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+          <circle cx="24" cy="24" r="20" stroke="var(--teal)" stroke-width="1.4" opacity=".35"/>
+          <g stroke="var(--teal)" stroke-width="1.5" opacity=".55"><path d="M24 8 L38 18 L33 35 L15 35 L10 18 Z"/><path d="M24 8 L33 35 M24 8 L15 35 M38 18 L15 35 M10 18 L33 35"/></g>
+          <g fill="var(--canvas)" stroke="var(--teal)" stroke-width="2.4"><circle cx="24" cy="8" r="3.4"/><circle cx="38" cy="18" r="3.4"/><circle cx="33" cy="35" r="3.4"/><circle cx="15" cy="35" r="3.4"/><circle cx="10" cy="18" r="3.4"/></g>
+        </svg>
+        <div class="view-head"><h1>Kith</h1><p class="sub">Your circle of devices, in sync.</p></div>
+        <div class="about">
+          <p class="lead">Kith keeps your notes and memory the same across all your own devices — directly, device to device.</p>
+          <p>There's no account to create and no company server holding your data, because there isn't one. Devices link with a short code, and everything is end-to-end encrypted on the way and encrypted on disk.</p>
+          <div class="secnote">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v6c0 4 3 6.5 7 9 4-2.5 7-5 7-9V6Z"/><path d="m9 12 2 2 4-4"/></svg>
+            <span><strong>Alpha software.</strong> Built and tested locally, not yet independently reviewed. Lovely for everyday notes; hold off on anything you couldn't bear to lose just yet.</span>
+          </div>
+          <div class="about-links">
+            <button class="btn-ghost js-ext" data-url="https://github.com/muhamadjawdatsalemalakoum/kith">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.94.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"/></svg>
+              Source on GitHub
+            </button>
+            <button class="btn-ghost js-ext" data-url="https://www.linkedin.com/in/akoum/">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.45 3H3.55C2.7 3 2 3.7 2 4.55v16.9c0 .85.7 1.55 1.55 1.55h16.9c.85 0 1.55-.7 1.55-1.55V4.55C22 3.7 21.3 3 20.45 3ZM8 18.3H5.3V9.7H8ZM6.65 8.5a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12ZM18.7 18.3H16V14c0-1-.02-2.3-1.4-2.3-1.4 0-1.62 1.1-1.62 2.23v4.37H10.3V9.7h2.59v1.18h.04c.36-.68 1.24-1.4 2.55-1.4 2.73 0 3.23 1.8 3.23 4.13Z"/></svg>
+              Built by Muhamad J. Akoum
+            </button>
+          </div>
+          <p class="section-label" style="margin-top:var(--sp-6)">Settings</p>
+          <div class="setting">
+            <div class="set-row">
+              <div class="set-label">Save downloads to</div>
+              <div class="set-val" id="set-download" title="">—</div>
+            </div>
+            <button class="btn-ghost sm" id="set-download-change">Change…</button>
+          </div>
+          <div class="setting">
+            <div class="set-row">
+              <div class="set-label">Data &amp; keys are stored in</div>
+              <div class="set-val" id="set-datadir" title="">—</div>
+            </div>
+            <button class="btn-ghost sm" id="set-datadir-open">Open</button>
+          </div>
+
+          <div class="about-foot">
+            <div class="kv"><span class="k">Version</span><span class="v" id="app-version">—</span></div>
+            <div class="kv" style="margin-top:6px"><span class="k">This device</span><span class="v" id="about-id">—</span></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- =============================== modals =============================== -->
+  <!-- Link (host) -->
+  <div class="scrim hidden" id="link-modal">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="link-title">
+      <h2 id="link-title">Link a device</h2>
+      <p class="sub">On your other computer, open Kith → Devices → <strong>Enter a code</strong>, then paste the code below. Keep this window open until it connects.</p>
+      <div class="code-card">
+        <p class="code-label">Your one-time code</p>
+        <div class="code" id="link-code">…</div>
+      </div>
+      <div class="waiting"><span class="spinner"></span> Waiting for the other computer to connect…</div>
+      <div class="sheet-actions">
+        <button class="btn-ghost" id="link-copy">Copy code</button>
+        <button class="btn-quiet" id="link-cancel">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Join (this device joins another) -->
+  <div class="scrim hidden" id="join-modal">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="join-title">
+      <h2 id="join-title">Enter a code</h2>
+      <p class="sub">Paste the code shown on your other computer. This links them so your memory syncs between them.</p>
+      <div class="field">
+        <label class="field-label" for="join-code">Code from the other computer</label>
+        <textarea class="input" id="join-code" rows="2" placeholder="Paste the whole code here" autocomplete="off" spellcheck="false"></textarea>
+      </div>
+      <div class="field">
+        <label class="field-label" for="join-name">Name this device (optional)</label>
+        <input class="input" id="join-name" type="text" placeholder="e.g. My laptop" autocomplete="off" />
+      </div>
+      <div class="form-error" id="join-error"></div>
+      <div class="form-ok hidden" id="join-ok"></div>
+      <div class="sheet-actions">
+        <button class="btn-quiet" id="join-cancel">Cancel</button>
+        <button class="btn" id="join-go"><span class="js-label">Link devices</span></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- First-run welcome -->
+  <div class="scrim hidden" id="welcome-modal">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="welcome-title" style="text-align:center">
+      <svg viewBox="0 0 48 48" fill="none" aria-hidden="true" style="width:64px;height:64px;margin:0 auto 6px;display:block">
+        <circle cx="24" cy="24" r="20" stroke="var(--teal)" stroke-width="1.4" opacity=".35"/>
+        <g stroke="var(--teal)" stroke-width="1.5" opacity=".55"><path d="M24 8 L38 18 L33 35 L15 35 L10 18 Z"/><path d="M24 8 L33 35 M24 8 L15 35 M38 18 L15 35 M10 18 L33 35"/></g>
+        <g fill="var(--canvas)" stroke="var(--teal)" stroke-width="2.4"><circle cx="24" cy="8" r="3.4"/><circle cx="38" cy="18" r="3.4"/><circle cx="33" cy="35" r="3.4"/><circle cx="15" cy="35" r="3.4"/><circle cx="10" cy="18" r="3.4"/></g>
+      </svg>
+      <h2 id="welcome-title">Welcome to Kith</h2>
+      <p class="sub" style="margin-inline:auto">Your notes, tabs, and files — the same on every device you own. No account, no cloud. The magic starts when you link a second device: it takes about a minute with a short code.</p>
+      <div class="sheet-actions" style="justify-content:center">
+        <button class="btn-quiet" id="welcome-skip">Maybe later</button>
+        <button class="btn" id="welcome-link">Link a device</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <!-- persistent credit -->
+  <div class="credit">
+    <a class="js-ext" data-url="https://www.linkedin.com/in/akoum/" href="#" title="Muhamad J. Akoum on LinkedIn">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.45 3H3.55C2.7 3 2 3.7 2 4.55v16.9c0 .85.7 1.55 1.55 1.55h16.9c.85 0 1.55-.7 1.55-1.55V4.55C22 3.7 21.3 3 20.45 3ZM8 18.3H5.3V9.7H8ZM6.65 8.5a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12ZM18.7 18.3H16V14c0-1-.02-2.3-1.4-2.3-1.4 0-1.62 1.1-1.62 2.23v4.37H10.3V9.7h2.59v1.18h.04c.36-.68 1.24-1.4 2.55-1.4 2.73 0 3.23 1.8 3.23 4.13Z"/></svg>
+      Built by Muhamad J. Akoum
+    </a>
+    <span class="dot">·</span>
+    <a class="js-ext" data-url="https://github.com/muhamadjawdatsalemalakoum/kith" href="#" title="Kith on GitHub">GitHub</a>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

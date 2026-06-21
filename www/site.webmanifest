@@ -1,0 +1,12 @@
+{
+  "name": "Kith",
+  "short_name": "Kith",
+  "description": "Your circle of devices, in sync — serverless, end-to-end-encrypted memory, tabs, and files.",
+  "start_url": "/kith/",
+  "display": "standalone",
+  "background_color": "#0A0F1A",
+  "theme_color": "#0E1B2E",
+  "icons": [
+    { "src": "icon.png", "sizes": "1024x1024", "type": "image/png" }
+  ]
+}

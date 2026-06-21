@@ -8,6 +8,7 @@
 //! explicitly armed (one-shot).
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
@@ -28,6 +29,14 @@ pub struct PairingHandler {
     pub armed: Arc<Mutex<Option<Vec<u8>>>>,
     /// The group key this device hands out on a successful pairing.
     pub group_key: [u8; 32],
+    /// Set to the joiner's endpoint id after a successful pairing (for the app to
+    /// show + persist; the engine has already peered with it).
+    pub joined: Arc<Mutex<Option<String>>>,
+    /// Shared peer set — a successful pairing peers the host back with the joiner so
+    /// both sides converge (not just the joiner dialing the host).
+    pub peers: Arc<tokio::sync::Mutex<Vec<iroh::EndpointAddr>>>,
+    /// Wakes the sync loop when the new peer is added.
+    pub changed: Arc<tokio::sync::Notify>,
 }
 
 // Redacted Debug (iroh's ProtocolHandler requires Debug) — never log key material.
@@ -69,12 +78,33 @@ impl PairingHandler {
         // Hand over the group key, encrypted under the confirmed ephemeral key.
         let blob = atrest::encrypt(&key, &self.group_key);
         write_frame(&mut send, &blob).await?;
-        let _ = send.finish();
 
+        // Learn the joiner's endpoint id (best-effort, time-boxed) and peer back with
+        // it. Without this only the joiner would dial the host, so a headless host or
+        // one whose joiner is offline would never converge — the core sync promise.
+        if let Ok(Ok(frame)) =
+            tokio::time::timeout(Duration::from_secs(10), read_frame(&mut recv)).await
+        {
+            if let Ok(id) = String::from_utf8(frame) {
+                let id = id.trim().to_string();
+                if !id.is_empty() {
+                    *self.joined.lock().expect("joined lock") = Some(id.clone());
+                    if let Ok(addr) = crate::endpoint_addr_from_id(&id) {
+                        let mut peers = self.peers.lock().await;
+                        if !peers.iter().any(|p| p.id == addr.id) {
+                            peers.push(addr);
+                            self.changed.notify_waiters();
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = send.finish();
         // One-shot: disarm after a successful pairing.
         *self.armed.lock().expect("armed lock") = None;
-        // Keep the connection open until the joiner has read the blob + closed.
-        conn.closed().await;
+        // The host closes once it has the joiner's id; the joiner waits on close.
+        conn.close(0u32.into(), b"paired");
         Ok(())
     }
 }
@@ -112,7 +142,11 @@ pub async fn join(
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&gk);
-    conn.close(0u32.into(), b"paired");
+    // Tell the host our endpoint id so it can peer back with us, then let it close.
+    let my_id = endpoint.id().to_string();
+    let _ = write_frame(&mut send, my_id.as_bytes()).await;
+    let _ = send.finish();
+    conn.closed().await;
     Ok(out)
 }
 

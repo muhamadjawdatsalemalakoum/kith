@@ -11,6 +11,7 @@
 mod model;
 
 use mesh_engine::{CoreConfig, EndpointAddr, Mesh, Result};
+pub use model::Tab;
 
 // Apps re-export the engine config so callers don't need a direct engine dependency
 // just to start one.
@@ -27,6 +28,35 @@ impl Tabs {
         Ok(Tabs {
             mesh: Mesh::start(config).await?,
         })
+    }
+
+    /// Wrap an already-running engine handle so this app can share ONE mesh with the
+    /// rest of the family (one identity, one pairing, one replica).
+    pub fn from_mesh(mesh: Mesh) -> Tabs {
+        Tabs { mesh }
+    }
+
+    /// Save a tab. Returns its id. Durable immediately and synced to peers.
+    pub async fn add(&self, url: &str, title: &str) -> Result<String> {
+        let id = model::add_tab(&self.mesh.doc(), url, title).await?;
+        self.mesh.save().await?;
+        self.mesh.announce_change();
+        Ok(id)
+    }
+
+    /// Every saved tab (newest handling left to the caller).
+    pub async fn all(&self) -> Vec<Tab> {
+        model::all_tabs(&self.mesh.doc()).await
+    }
+
+    /// Forget a tab by id. Returns whether it was found.
+    pub async fn forget(&self, id: &str) -> Result<bool> {
+        let found = model::remove_tab(&self.mesh.doc(), id).await?;
+        if found {
+            self.mesh.save().await?;
+            self.mesh.announce_change();
+        }
+        Ok(found)
     }
 
     /// This device's stable public identity.
@@ -83,6 +113,16 @@ impl mesh_mcp::McpApp for Tabs {
                 }),
             ),
             mesh_mcp::ToolDef::new(
+                "tabs.list",
+                "List saved tabs (id, url, title).",
+                json!({ "type": "object" }),
+            ),
+            mesh_mcp::ToolDef::new(
+                "tabs.forget",
+                "Remove a saved tab by id.",
+                json!({ "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }),
+            ),
+            mesh_mcp::ToolDef::new(
                 "tabs.count",
                 "How many tabs are saved.",
                 json!({ "type": "object" }),
@@ -115,6 +155,28 @@ impl mesh_mcp::McpApp for Tabs {
                 self.mesh.save().await.map_err(|e| e.to_string())?; // durable now
                 self.mesh.announce_change(); // and sync to peers
                 Ok(json!({ "ok": true }))
+            }
+            "tabs.list" => {
+                let items: Vec<_> = model::all_tabs(&self.mesh.doc())
+                    .await
+                    .into_iter()
+                    .map(|t| json!({ "id": t.id, "url": t.url, "title": t.title }))
+                    .collect();
+                Ok(json!({ "tabs": items }))
+            }
+            "tabs.forget" => {
+                let id = args
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or("missing 'id'")?;
+                let found = model::remove_tab(&self.mesh.doc(), id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if found {
+                    self.mesh.save().await.map_err(|e| e.to_string())?;
+                    self.mesh.announce_change();
+                }
+                Ok(json!({ "forgotten": found }))
             }
             "tabs.count" => Ok(json!({ "count": model::count_tabs(&self.mesh.doc()).await })),
             "tabs.first_url" => Ok(json!({ "url": model::first_tab_url(&self.mesh.doc()).await })),

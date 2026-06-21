@@ -137,29 +137,25 @@ forget with tombstones), a `Memory` facade, and the MCP surface
 - **Exit:** memory taught to an agent on device A is readable by the agent on device
   B after sync; import works; runs as a quiet tray daemon.
 
-### M4 — Make it real (runnable)  ·  M  ·  ◑ PARTIAL
-- ✅ **Runnable binary**: `agent-memory` ships an MCP server (`serve`, stdio) you can
-  wire straight into Claude Desktop today, plus a `remember`/`recall`/`id` CLI. See
-  `apps/memory/README.md`. This is the real "make it usable" artifact for the wedge —
-  no GUI required.
-- ⬜ **Desktop GUI cockpit** (Tauri tray/dashboard): DEFERRED — it needs a frontend-
-  toolchain decision (Tauri vs egui vs tray-only) + icon/bundle assets, a deliberate
-  product choice rather than something to guess. Tracked for a focused pass.
-- ⬜ **Device-pairing CLI** (`link`/`pair` by short code): the library pairs (SPAKE2)
-  and the engine syncs by peer; a binary subcommand to link devices for non-coders is
-  the next concrete step (needs a small over-the-wire pairing handshake + real-network
-  test).
+### M4 — Make it real (runnable)  ·  M  ·  ✅ DONE
+- ✅ **Desktop app** (`kith`, Tauri v2): Memory, Tabs, Files, Devices (pairing), and
+  Agents (MCP) — see `apps/desktop`. The same binary runs `kith serve` (unified MCP
+  server) for Claude Desktop / Cursor; `agent-memory` remains as a memory-only CLI.
+- ✅ **Device pairing UI**: link by short code (SPAKE2 over the wire), mutual so both
+  sides converge; the engine peers back with the joiner.
 
-### M5 — Launch  ·  M  ·  ◑ PARTIAL (autonomous parts done)
+### M5 — Launch  ·  M  ·  ◑ PARTIAL
 - ✅ **CI** (`.github/workflows/ci.yml`): cross-OS tests + the relay-path test +
-  `fmt --check` + `clippy -D warnings` (the tree is fmt- and clippy-clean, so these
-  gates pass).
-- ✅ **Release pipeline** (`.github/workflows/release.yml`): builds the `agent-memory`
-  binary for Linux / Windows / macOS (Intel + Apple Silicon) on a `v*` tag.
-- ✅ **Dual license** (`LICENSE-MIT` + `LICENSE-APACHE`) + root `README`.
-- ⬜ **Needs your hands / accounts** (cannot be automated): code signing + macOS
-  notarization, store/dev accounts, an optional self-hosted relay deployment, landing
-  page + demo GIF, and the actual Product Hunt launch.
+  `fmt --check` + `clippy -D warnings`, plus a `desktop` job that builds, lints, and
+  tests the GUI app on all three OSes (webview deps installed).
+- ✅ **Release pipeline** (`.github/workflows/release.yml`): builds + bundles the Kith
+  desktop **installers** (Windows `.exe`, macOS universal `.dmg`, Linux
+  `.AppImage`/`.deb`/`.rpm`) on a `v*` tag, version pinned from the tag.
+- ✅ **Dual license** (`LICENSE-MIT` + `LICENSE-APACHE`) + root `README` + install /
+  pairing / privacy / releasing docs (`docs/`).
+- ⬜ **Needs your accounts** (cannot be automated): code signing + macOS notarization,
+  the auto-updater signing key (see `docs/RELEASING.md`), a landing page + demo GIF,
+  and the actual Product Hunt launch.
 - **Exit:** publicly installable + launched.
 
 ---

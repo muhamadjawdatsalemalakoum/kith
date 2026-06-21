@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kith — your circle of devices, in sync</title>
+  <meta name="description" content="Serverless, end-to-end-encrypted, no-account sync for your own devices — memory, tabs, and files. No cloud, no server that can read your data. Your AI can use it too, over MCP. Windows, macOS, Linux." />
+  <link rel="icon" href="icon.png" />
+  <link rel="canonical" href="https://muhamadjawdatsalemalakoum.github.io/kith/" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Kith — your circle of devices, in sync" />
+  <meta property="og:description" content="Serverless, end-to-end-encrypted sync for your own devices — memory, tabs, and files. No account, no cloud. Your AI can use it too, over MCP." />
+  <meta property="og:image" content="https://muhamadjawdatsalemalakoum.github.io/kith/og.png" />
+  <meta property="og:url" content="https://muhamadjawdatsalemalakoum.github.io/kith/" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Kith — your circle of devices, in sync" />
+  <meta name="twitter:description" content="Serverless, end-to-end-encrypted sync for your own devices — memory, tabs, and files. No account, no cloud." />
+  <meta name="twitter:image" content="https://muhamadjawdatsalemalakoum.github.io/kith/og.png" />
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"Kith","applicationCategory":"ProductivityApplication","operatingSystem":"Windows, macOS, Linux","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"description":"Serverless, end-to-end-encrypted, no-account sync for your own devices — memory, tabs, and files.","downloadUrl":"https://github.com/muhamadjawdatsalemalakoum/kith/releases","author":{"@type":"Person","name":"Muhamad J. Akoum","url":"https://www.linkedin.com/in/akoum/"}}
+  </script>
+  <style>
+    :root{
+      --teal:#2DD4BF;--teal-press:#14B8A6;--amber:#F5A623;
+      --canvas:#0A0F1A;--base:#0E1B2E;--surface:#11223A;--line:#1E3047;
+      --text:#EAF1FA;--muted:#9FB1C6;--faint:#65788F;--on-teal:#04211d;
+      --font:"Inter",-apple-system,"Segoe UI",Roboto,system-ui,sans-serif;
+      --mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+    }
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth}
+    body{margin:0;font-family:var(--font);color:var(--text);line-height:1.6;
+      background:
+        radial-gradient(1100px 560px at 78% -10%, rgba(45,212,191,.12), transparent 60%),
+        radial-gradient(900px 520px at -8% 8%, rgba(91,160,255,.08), transparent 55%),
+        var(--canvas);
+      -webkit-font-smoothing:antialiased}
+    a{color:var(--teal);text-decoration:none}
+    a:hover{text-decoration:underline}
+    .wrap{max-width:960px;margin:0 auto;padding:0 24px}
+    header{display:flex;align-items:center;justify-content:space-between;padding:22px 0}
+    .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;color:var(--text)}
+    .brand img{width:30px;height:30px}
+    nav a{color:var(--muted);margin-left:22px;font-size:14px}
+    .btn{display:inline-flex;align-items:center;gap:8px;height:46px;padding:0 22px;border-radius:12px;
+      background:var(--teal);color:var(--on-teal);font-weight:650;font-size:15px;
+      box-shadow:0 0 18px rgba(45,212,191,.25);transition:transform .15s,box-shadow .15s}
+    .btn:hover{transform:translateY(-1px);box-shadow:0 0 26px rgba(45,212,191,.4);text-decoration:none}
+    .btn-ghost{display:inline-flex;align-items:center;height:46px;padding:0 20px;border-radius:12px;
+      border:1px solid var(--line);color:var(--text);font-weight:550;font-size:15px}
+    .btn-ghost:hover{background:var(--surface);text-decoration:none}
+    .hero{text-align:center;padding:56px 0 28px}
+    .hero h1{font-size:clamp(34px,6vw,56px);line-height:1.08;letter-spacing:-1.2px;margin:0 0 16px;font-weight:750}
+    .hero p.lead{font-size:clamp(17px,2.4vw,21px);color:var(--muted);max-width:40ch;margin:0 auto 28px}
+    .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+    .pills{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:22px}
+    .pill{font-size:12.5px;color:var(--muted);background:var(--surface);border:1px solid var(--line);
+      border-radius:999px;padding:6px 13px}
+    .shot{max-width:880px;margin:36px auto 0;border:1px solid var(--line);border-radius:18px;display:block;width:100%;
+      box-shadow:0 30px 80px rgba(0,0,0,.5)}
+    section{padding:48px 0}
+    h2{font-size:clamp(24px,3.6vw,32px);letter-spacing:-.6px;margin:0 0 8px;text-align:center}
+    .sub{color:var(--muted);text-align:center;max-width:54ch;margin:0 auto 32px}
+    .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+    @media(max-width:760px){.grid{grid-template-columns:1fr}}
+    .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:22px}
+    .card .ic{width:40px;height:40px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+      background:rgba(45,212,191,.14);color:var(--teal);margin-bottom:12px}
+    .card h3{margin:0 0 6px;font-size:17px}
+    .card p{margin:0;color:var(--muted);font-size:14.5px}
+    .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;counter-reset:step}
+    @media(max-width:760px){.steps{grid-template-columns:1fr}}
+    .step{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:22px}
+    .step::before{counter-increment:step;content:counter(step);display:flex;align-items:center;justify-content:center;
+      width:30px;height:30px;border-radius:999px;background:var(--teal);color:var(--on-teal);font-weight:700;margin-bottom:12px}
+    .step h3{margin:0 0 6px;font-size:16px}
+    .step p{margin:0;color:var(--muted);font-size:14px}
+    .mcp{background:var(--base);border:1px solid var(--line);border-radius:16px;padding:24px;max-width:680px;margin:0 auto}
+    pre{background:#0A1322;border:1px solid var(--line);border-radius:12px;padding:16px;overflow:auto;
+      font-family:var(--mono);font-size:13px;color:#cfe;margin:14px 0 0}
+    .tools{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:14px}
+    .tool{font-family:var(--mono);font-size:12.5px;color:var(--teal);background:rgba(45,212,191,.1);
+      border:1px solid var(--line);border-radius:999px;padding:5px 11px}
+    .note{max-width:640px;margin:28px auto 0;color:var(--muted);font-size:13.5px;text-align:center;
+      background:rgba(245,166,35,.08);border:1px solid var(--line);border-radius:12px;padding:14px 18px}
+    footer{border-top:1px solid var(--line);margin-top:24px;padding:28px 0;color:var(--faint);font-size:14px;
+      display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
+    footer a{color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <span class="brand"><img src="icon.png" alt="" /> Kith</span>
+      <nav>
+        <a href="#features">Features</a>
+        <a href="#how">How it works</a>
+        <a href="#ai">For AI</a>
+        <a href="https://github.com/muhamadjawdatsalemalakoum/kith">GitHub</a>
+      </nav>
+    </header>
+
+    <div class="hero">
+      <h1>Your circle of devices, in&nbsp;sync.</h1>
+      <p class="lead">Serverless, end-to-end-encrypted memory, tabs, and files across your own devices. No account. No cloud. No server that can read your data — because there isn't one.</p>
+      <div class="cta">
+        <a class="btn" href="https://github.com/muhamadjawdatsalemalakoum/kith/releases">Download for free</a>
+        <a class="btn-ghost" href="https://github.com/muhamadjawdatsalemalakoum/kith">View source</a>
+      </div>
+      <div class="pills">
+        <span class="pill">Windows · macOS · Linux</span>
+        <span class="pill">End-to-end encrypted</span>
+        <span class="pill">No account</span>
+        <span class="pill">Open source</span>
+        <span class="pill">MCP-native</span>
+      </div>
+      <img class="shot" src="og.png" alt="Kith" />
+    </div>
+
+    <section id="features">
+      <h2>One private space, everywhere</h2>
+      <p class="sub">Link your devices once with a short code. Everything below stays in sync between them, automatically.</p>
+      <div class="grid">
+        <div class="card">
+          <div class="ic"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/><path d="M14 3v5h5M8 13h8M8 17h6"/></svg></div>
+          <h3>Memory</h3>
+          <p>Notes and facts that follow you across every device — and that your AI can read and add to.</p>
+        </div>
+        <div class="card">
+          <div class="ic"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="14" rx="2"/><path d="M3 9h6l1.5-2.5h4L16 9h5"/></svg></div>
+          <h3>Tabs</h3>
+          <p>Save links and pages on one machine and open them on another. A reading list that's actually everywhere.</p>
+        </div>
+        <div class="card">
+          <div class="ic"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M8 8l4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div>
+          <h3>Files</h3>
+          <p>Send files straight to your own devices — end-to-end encrypted, no size limit, no cloud, with live progress.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="how">
+      <h2>How it works</h2>
+      <p class="sub">A flat mesh: every device is an equal peer holding a full, encrypted replica. No hub, no data-bearing server.</p>
+      <div class="steps">
+        <div class="step"><h3>Install &amp; open</h3><p>Download Kith on each computer you own. It just works — there's nothing to sign up for.</p></div>
+        <div class="step"><h3>Link with a code</h3><p>Show a one-time code on one device, paste it on the other. They derive a shared key with SPAKE2 and never send the code over the wire.</p></div>
+        <div class="step"><h3>Stay in sync</h3><p>Changes flow directly between your devices over encrypted QUIC. Offline edits are pending, not lost.</p></div>
+      </div>
+    </section>
+
+    <section id="ai">
+      <h2>Built for your AI, too</h2>
+      <p class="sub">Kith speaks MCP. Point Claude Desktop or Cursor at it and your assistant works with your own memory, tabs, and files — locally, with no server in the middle.</p>
+      <div class="mcp">
+        <strong>Add to your MCP client:</strong>
+        <pre>{ "mcpServers": { "kith": { "command": "/path/to/kith", "args": ["serve"] } } }</pre>
+        <div class="tools">
+          <span class="tool">memory.append</span><span class="tool">memory.search</span><span class="tool">memory.read</span>
+          <span class="tool">tabs.add</span><span class="tool">tabs.list</span>
+          <span class="tool">files.share</span><span class="tool">files.fetch</span>
+        </div>
+      </div>
+    </section>
+
+    <p class="note"><strong>Alpha.</strong> Built and tested, not yet independently audited. Lovely for everyday use; hold off on anything you couldn't bear to lose just yet. <a href="https://github.com/muhamadjawdatsalemalakoum/kith/blob/main/SECURITY.md">Security details →</a></p>
+
+    <section style="text-align:center">
+      <h2>Get your circle in sync</h2>
+      <p class="sub">Free and open source. Dual-licensed MIT / Apache-2.0.</p>
+      <a class="btn" href="https://github.com/muhamadjawdatsalemalakoum/kith/releases">Download Kith</a>
+    </section>
+
+    <footer>
+      <span>Made with <a href="https://www.iroh.computer/" rel="noopener">iroh</a> &amp; <a href="https://automerge.org" rel="noopener">Automerge</a> · Built by <a href="https://www.linkedin.com/in/akoum/" rel="noopener">Muhamad J. Akoum</a></span>
+      <span><a href="https://github.com/muhamadjawdatsalemalakoum/kith">GitHub</a> · <a href="https://github.com/muhamadjawdatsalemalakoum/kith#readme">Docs</a></span>
+    </footer>
+  </div>
+</body>
+</html>

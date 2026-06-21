@@ -1,0 +1,41 @@
+[package]
+name = "kith"
+description = "Kith — your private memory, on every device."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+default-run = "kith"
+
+# Tauri's lib/main split. Desktop-only, so a plain rlib (no staticlib/cdylib mobile
+# artifacts) — that keeps `cargo test --workspace` building shared deps as rlibs.
+[lib]
+name = "kith_lib"
+crate-type = ["lib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-window-state = "2"
+# One shared engine; the thin apps (memory + tabs + files) run on it, and the unified
+# MCP server (`kith serve`) exposes all of them to AI agents.
+mesh-engine = { path = "../../mesh-engine" }
+mesh-mcp = { path = "../../mesh-mcp" }
+agent-memory = { path = "../memory" }
+centraltabs = { path = "../tabs" }
+kith-files = { path = "../files" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

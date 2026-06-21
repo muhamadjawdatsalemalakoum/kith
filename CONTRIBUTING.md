@@ -12,32 +12,46 @@ propose changes.
   `rustup` will install the right one automatically.
 - Git.
 
+## Prerequisites (desktop app)
+
+The `kith` desktop app is built with [Tauri v2](https://v2.tauri.app). To build or run
+it you also need the Tauri prerequisites for your OS (a C toolchain, and on Linux
+`libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`). The frontend is
+plain HTML/CSS/JS in `apps/desktop/ui` — no Node build step.
+
 ## Build & test
 
 ```sh
-# Build everything
-cargo build --workspace
-
-# Run the full test suite
-cargo test --workspace
+# Build / test everything EXCEPT the GUI crate (which needs webview libs)
+cargo build --workspace --exclude kith
+cargo test  --workspace --exclude kith
 
 # Real-transport (in-process relay) test
 cargo test -p mesh-engine --features test-utils --test relay
 
+# The desktop app
+cargo run -p kith            # build + launch the GUI
+cargo build -p kith          # compile-check it
+cargo tauri build            # build installers (needs: cargo install tauri-cli)
+
 # Lints — these are CI gates and must pass clean
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --exclude kith -- -D warnings
+cargo clippy -p kith --all-targets -- -D warnings
 ```
 
-CI runs all of the above on Linux, macOS, and Windows. A PR must be green before merge.
+CI runs all of the above on Linux, macOS, and Windows (the GUI crate in its own job with
+the webview deps installed). A PR must be green before merge.
 
 ## Workspace layout
 
 ```
-mesh-engine/   the substrate (identity, discovery, pairing, CRDT sync, blobs)
+mesh-engine/   the substrate (identity, discovery, pairing, group-key-gated sync + blobs)
 mesh-mcp/      the local MCP host (one trait → AI-agent-accessible app)
-apps/memory/   agent-memory — the flagship app
-apps/tabs/     centralTabs — the proof app
+apps/memory/   agent-memory — the memory app/schema
+apps/tabs/     centraltabs — tab/link sync
+apps/files/    kith-files — file sharing on the blob primitive
+apps/desktop/  kith — the Tauri desktop app + `kith serve` unified MCP server
 ```
 
 ## Architectural rules (please respect these)

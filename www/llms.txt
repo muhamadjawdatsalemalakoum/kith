@@ -1,0 +1,17 @@
+# Kith
+
+> Serverless, end-to-end-encrypted, no-account sync for your own devices — memory,
+> tabs, and files. Direct device-to-device over iroh (QUIC) with Automerge CRDTs; no
+> cloud and no server that can read your data. Also an MCP server, so AI assistants can
+> use your memory/tabs/files locally. Desktop app for Windows, macOS, and Linux.
+
+## Key facts
+- Apps: Memory (notes/facts), Tabs (links), Files (E2E file transfer), Devices (pairing), Agents (MCP).
+- Pairing: a short one-time code (SPAKE2); no account. Both sync and file transfer are gated by a mutual group-key proof.
+- MCP: run `kith serve` (the same binary) — tools: memory.append/search/read/forget, tabs.add/list/forget, files.share/list/fetch.
+- License: MIT OR Apache-2.0. Status: alpha (not independently audited).
+
+## Links
+- Source: https://github.com/muhamadjawdatsalemalakoum/kith
+- Download: https://github.com/muhamadjawdatsalemalakoum/kith/releases
+- Author: Muhamad J. Akoum (https://www.linkedin.com/in/akoum/)

@@ -23,6 +23,7 @@
 //! [iroh]: https://iroh.computer
 
 mod atrest;
+mod auth;
 mod blobs;
 mod config;
 mod doc;
@@ -79,10 +80,11 @@ struct Inner {
     blobs_store: iroh_blobs::store::fs::FsStore,
     /// Temp tags for files we serve, held so their blobs aren't garbage-collected.
     kept_tags: Mutex<Vec<TempTag>>,
-    /// Peers we keep converged with (their reachable addresses).
-    peers: Mutex<Vec<EndpointAddr>>,
+    /// Peers we keep converged with (their reachable addresses). Shared with the
+    /// pairing handler so a successful pairing peers both sides automatically.
+    peers: Arc<Mutex<Vec<EndpointAddr>>>,
     /// Pinged on a local change or a new peer to wake the sync loop immediately.
-    changed: Notify,
+    changed: Arc<Notify>,
     /// Where the compacted replica snapshot is persisted (encrypted at rest).
     doc_path: PathBuf,
     /// Per-device key encrypting the snapshot on disk.
@@ -91,6 +93,9 @@ struct Inner {
     group_key: [u8; 32],
     /// The currently-armed pairing code (Some while in "add a device" mode).
     pair_armed: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    /// Set to the endpoint id of a device that just paired in (host side), so the
+    /// app can show + persist it. Drained by [`Mesh::take_joined`].
+    pair_joined: Arc<std::sync::Mutex<Option<String>>>,
     /// Stops the background loop on shutdown.
     cancel: CancellationToken,
 }
@@ -132,6 +137,10 @@ impl Mesh {
         let blobs_store = blobs::open(&config.data_dir.join("blobs")).await?;
         let endpoint = endpoint::build(secret, &config.infra, config.enable_blobs).await?;
         let pair_armed = Arc::new(std::sync::Mutex::new(None));
+        let pair_joined = Arc::new(std::sync::Mutex::new(None));
+        // Shared with the pairing handler so a completed pairing peers both sides.
+        let peers: Arc<Mutex<Vec<EndpointAddr>>> = Arc::new(Mutex::new(Vec::new()));
+        let changed = Arc::new(Notify::new());
         // Mesh sync + pairing always; blobs only when explicitly enabled.
         let mut builder = Router::builder(endpoint)
             .accept(MESH_ALPN, sync.clone())
@@ -140,12 +149,15 @@ impl Mesh {
                 pair::PairingHandler {
                     armed: pair_armed.clone(),
                     group_key,
+                    joined: pair_joined.clone(),
+                    peers: peers.clone(),
+                    changed: changed.clone(),
                 },
             );
         if config.enable_blobs {
             builder = builder.accept(
                 iroh_blobs::ALPN,
-                iroh_blobs::BlobsProtocol::new(&blobs_store, None),
+                blobs::GatedBlobs::new(&blobs_store, group_key),
             );
         }
         let router = builder.spawn();
@@ -156,12 +168,13 @@ impl Mesh {
             doc,
             blobs_store,
             kept_tags: Mutex::new(Vec::new()),
-            peers: Mutex::new(Vec::new()),
-            changed: Notify::new(),
+            peers,
+            changed,
             doc_path,
             atrest_key,
             group_key,
             pair_armed,
+            pair_joined,
             cancel: CancellationToken::new(),
         });
 
@@ -184,7 +197,21 @@ impl Mesh {
     /// short human code shown on this device), then disarm. Run this on the device the
     /// user is joining FROM.
     pub fn arm_pairing(&self, code: &[u8]) {
+        *self.inner.pair_joined.lock().expect("joined lock") = None;
         *self.inner.pair_armed.lock().expect("armed lock") = Some(code.to_vec());
+    }
+
+    /// Leave "add a device" mode without completing a pairing (e.g. the user
+    /// cancelled). Safe to call when not armed.
+    pub fn disarm_pairing(&self) {
+        *self.inner.pair_armed.lock().expect("armed lock") = None;
+    }
+
+    /// Take the endpoint id of a device that just paired in (host side), clearing it.
+    /// Returns `None` until a device completes pairing against an armed code. The
+    /// engine has already added it as a sync peer; this is for the app to show + persist.
+    pub fn take_joined(&self) -> Option<String> {
+        self.inner.pair_joined.lock().expect("joined lock").take()
     }
 
     /// Join the group hosted by `host` using the shared short `code`: run the SPAKE2
@@ -242,10 +269,34 @@ impl Mesh {
     }
 
     /// Add a peer to keep converged with. The background loop will sync with it
-    /// continuously (and immediately). Idempotent-ish; add each of your devices.
+    /// continuously (and immediately). Idempotent: adding a peer already known (same
+    /// endpoint id) is a no-op, so it never spawns duplicate sync tasks.
     pub async fn add_peer(&self, peer: EndpointAddr) {
-        self.inner.peers.lock().await.push(peer);
+        {
+            let mut peers = self.inner.peers.lock().await;
+            if peers.iter().any(|p| p.id == peer.id) {
+                return;
+            }
+            peers.push(peer);
+        }
         self.inner.changed.notify_waiters();
+    }
+
+    /// Stop keeping a peer converged: drop it from the peer set so the background loop
+    /// cancels its sync task on the next tick. Returns whether it was present.
+    pub async fn remove_peer(&self, id: &str) -> bool {
+        let Ok(addr) = endpoint_addr_from_id(id) else {
+            return false;
+        };
+        let mut peers = self.inner.peers.lock().await;
+        let before = peers.len();
+        peers.retain(|p| p.id != addr.id);
+        let removed = peers.len() != before;
+        drop(peers);
+        if removed {
+            self.inner.changed.notify_waiters();
+        }
+        removed
     }
 
     /// Tell the engine the local replica just changed, so it syncs + persists now
@@ -297,7 +348,40 @@ impl Mesh {
             .await
             .map_err(|_| CoreError::Unreachable("connect timed out".into()))?
             .map_err(|e| CoreError::Unreachable(e.to_string()))?;
-        blobs::fetch_to(&self.inner.blobs_store, conn, hash, dest).await
+        blobs::fetch_to(
+            &self.inner.blobs_store,
+            conn,
+            hash,
+            dest,
+            &self.inner.group_key,
+        )
+        .await
+    }
+
+    /// BLOB PRIMITIVE — fetch a file by `hash` from `peer`, reporting live progress
+    /// via `on_progress(bytes_downloaded, relayed)`. Resumes from partial data;
+    /// BLAKE3-verified end to end.
+    pub async fn fetch_file_with_progress(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        hash: Hash,
+        dest: &Path,
+        on_progress: impl FnMut(u64, bool),
+    ) -> Result<()> {
+        let connect = self.inner.router.endpoint().connect(peer, iroh_blobs::ALPN);
+        let conn = tokio::time::timeout(CONNECT_TIMEOUT, connect)
+            .await
+            .map_err(|_| CoreError::Unreachable("connect timed out".into()))?
+            .map_err(|e| CoreError::Unreachable(e.to_string()))?;
+        blobs::fetch_to_with_progress(
+            &self.inner.blobs_store,
+            conn,
+            hash,
+            dest,
+            &self.inner.group_key,
+            on_progress,
+        )
+        .await
     }
 
     /// Persist the replica now (a compacted snapshot). Also done automatically by
@@ -317,35 +401,76 @@ impl Mesh {
     }
 }
 
+/// Build a connectable [`EndpointAddr`] from a peer's endpoint-id string. Discovery
+/// (mainline DHT / n0 DNS, per the configured infra) resolves the actual paths, so an
+/// id alone is enough to dial a peer that is online. Used by pairing + device linking.
+pub fn endpoint_addr_from_id(id: &str) -> Result<EndpointAddr> {
+    let id: iroh::EndpointId = id
+        .trim()
+        .parse()
+        .map_err(|e| CoreError::Pairing(format!("invalid device id: {e}")))?;
+    Ok(EndpointAddr::from(id))
+}
+
+/// Parse a content [`Hash`] from its string form (as stored in a file offer), so
+/// apps can move blobs by hash without depending on `iroh_blobs` directly.
+pub fn hash_from_str(s: &str) -> Result<Hash> {
+    s.trim()
+        .parse::<Hash>()
+        .map_err(|e| CoreError::Other(anyhow::anyhow!("invalid file hash: {e}")))
+}
+
 /// Background loop: on a change/new-peer ping or every [`SYNC_INTERVAL`], sync with
 /// every known peer and persist the replica. Exits when the engine shuts down.
 async fn sync_loop(inner: Arc<Inner>) {
-    let mut spawned = 0usize;
+    // One independent, cancellable sync task per peer (keyed by endpoint id), so a
+    // slow/dead peer is fully isolated. Each tick we reconcile: spawn tasks for newly
+    // added peers, cancel tasks for peers that were removed.
+    let mut tasks: std::collections::HashMap<iroh::EndpointId, CancellationToken> =
+        std::collections::HashMap::new();
     loop {
         tokio::select! {
             _ = inner.cancel.cancelled() => break,
             _ = inner.changed.notified() => {}
             _ = tokio::time::sleep(SYNC_INTERVAL) => {}
         }
-        // Give each newly-added peer its OWN long-lived sync task, so a slow/dead peer
-        // (bounded by its own timeouts) is fully isolated — it can never delay syncing
-        // with the others. This loop just spawns those tasks and persists.
         let peers = inner.peers.lock().await.clone();
-        while spawned < peers.len() {
-            tokio::spawn(peer_sync_task(inner.clone(), peers[spawned].clone()));
-            spawned += 1;
+        let current: std::collections::HashSet<iroh::EndpointId> =
+            peers.iter().map(|p| p.id).collect();
+        // Spawn for newly-added peers.
+        for p in &peers {
+            tasks.entry(p.id).or_insert_with(|| {
+                let token = CancellationToken::new();
+                tokio::spawn(peer_sync_task(inner.clone(), p.clone(), token.clone()));
+                token
+            });
         }
+        // Cancel + forget tasks for peers no longer in the set.
+        tasks.retain(|id, token| {
+            if current.contains(id) {
+                true
+            } else {
+                token.cancel();
+                false
+            }
+        });
         let _ = save_doc(&inner).await;
+    }
+    // On shutdown, stop every peer task.
+    for (_, token) in tasks {
+        token.cancel();
     }
 }
 
 /// One independent task per peer: re-sync on a change/new-peer ping or every
-/// interval, each round bounded by timeouts. Isolation is the whole point — a dead
+/// interval, each round bounded by timeouts. Exits on engine shutdown or when this
+/// peer is removed (its `token` is cancelled). Isolation is the whole point — a dead
 /// peer here spins on its own without touching any other peer or persistence.
-async fn peer_sync_task(inner: Arc<Inner>, peer: EndpointAddr) {
+async fn peer_sync_task(inner: Arc<Inner>, peer: EndpointAddr, token: CancellationToken) {
     loop {
         tokio::select! {
             _ = inner.cancel.cancelled() => break,
+            _ = token.cancelled() => break,
             _ = inner.changed.notified() => {}
             _ = tokio::time::sleep(SYNC_INTERVAL) => {}
         }

@@ -12,14 +12,62 @@ use std::time::Duration;
 
 use anyhow::Context;
 use iroh::endpoint::Connection;
+use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh_blobs::api::blobs::{AddPathOptions, ExportMode, ExportOptions, ImportMode};
 use iroh_blobs::api::remote::GetProgressItem;
 use iroh_blobs::api::TempTag;
 use iroh_blobs::store::fs::FsStore;
-use iroh_blobs::{BlobFormat, Hash, HashAndFormat};
+use iroh_blobs::{BlobFormat, BlobsProtocol, Hash, HashAndFormat};
 use n0_future::StreamExt;
 
 use crate::error::{CoreError, Result};
+
+/// Wraps the stock blobs provider with a group-key gate: a peer must prove possession
+/// of the shared group key ([`crate::auth`]) on the first stream before ANY blob bytes
+/// are served. Without this the blobs ALPN would hand any hash to any caller — the
+/// content hash would be the only capability. Mirrors the sync layer's auth gate.
+pub struct GatedBlobs {
+    inner: BlobsProtocol,
+    group_key: [u8; 32],
+}
+
+impl GatedBlobs {
+    pub fn new(store: &FsStore, group_key: [u8; 32]) -> Self {
+        Self {
+            inner: BlobsProtocol::new(store, None),
+            group_key,
+        }
+    }
+}
+
+// Redacted Debug (ProtocolHandler requires Debug) — never log key material.
+impl std::fmt::Debug for GatedBlobs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GatedBlobs { .. }")
+    }
+}
+
+impl ProtocolHandler for GatedBlobs {
+    async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
+        // The first bi-stream is the group-key handshake; reject non-members before
+        // the stock provider ever sees the connection.
+        let (mut send, mut recv) = conn
+            .accept_bi()
+            .await
+            .map_err(|e| AcceptError::from_err(std::io::Error::other(e.to_string())))?;
+        crate::auth::responder(&self.group_key, &mut send, &mut recv)
+            .await
+            .map_err(|e| AcceptError::from_err(std::io::Error::other(e.to_string())))?;
+        let _ = send.finish();
+        // Authenticated: hand the rest of the connection to the stock blobs provider,
+        // which loops accepting the subsequent request stream(s).
+        self.inner.accept(conn).await
+    }
+
+    async fn shutdown(&self) {
+        self.inner.shutdown().await;
+    }
+}
 
 /// If no download progress arrives within this window, treat the transfer as stalled
 /// (e.g. a dead peer mid-fetch) instead of hanging forever. It resets on each
@@ -54,7 +102,28 @@ pub async fn add_file(store: &FsStore, path: &Path) -> Result<TempTag> {
 
 /// Download the raw blob named by `hash` over `conn` (resuming from any partial
 /// data already local), then export it to `dest`. BLAKE3-verified end to end.
-pub async fn fetch_to(store: &FsStore, conn: Connection, hash: Hash, dest: &Path) -> Result<()> {
+pub async fn fetch_to(
+    store: &FsStore,
+    conn: Connection,
+    hash: Hash,
+    dest: &Path,
+    group_key: &[u8; 32],
+) -> Result<()> {
+    fetch_to_with_progress(store, conn, hash, dest, group_key, |_, _| {}).await
+}
+
+/// Like [`fetch_to`], but calls `on_progress(bytes_downloaded, relayed)` as data
+/// arrives — the live byte count plus whether the current path is via the relay
+/// (for a direct-vs-relayed badge). The total size is known by the caller (it rides
+/// in the file offer), so it isn't reported here.
+pub async fn fetch_to_with_progress(
+    store: &FsStore,
+    conn: Connection,
+    hash: Hash,
+    dest: &Path,
+    group_key: &[u8; 32],
+    mut on_progress: impl FnMut(u64, bool),
+) -> Result<()> {
     let hf = HashAndFormat::raw(hash);
 
     // Resume: only request what's missing (everything, on a first fetch).
@@ -64,6 +133,16 @@ pub async fn fetch_to(store: &FsStore, conn: Connection, hash: Hash, dest: &Path
         .await
         .context("inspect local store")?;
     if !local.is_complete() {
+        // Prove we hold the group key before requesting any bytes (the provider gates
+        // on this; an unauthenticated peer is served nothing).
+        {
+            let (mut a_send, mut a_recv) = conn.open_bi().await.context("open blob auth stream")?;
+            crate::auth::initiator(group_key, &mut a_send, &mut a_recv)
+                .await
+                .context("blob group authentication")?;
+            let _ = a_send.finish();
+        }
+        let route_conn = conn.clone(); // route can upgrade relay→direct mid-transfer
         let get = store.remote().execute_get(conn, local.missing());
         let mut stream = get.stream();
         loop {
@@ -74,7 +153,9 @@ pub async fn fetch_to(store: &FsStore, conn: Connection, hash: Hash, dest: &Path
                 Ok(Some(GetProgressItem::Error(e))) => {
                     return Err(CoreError::Sync(format!("download failed: {e}")))
                 }
-                Ok(Some(GetProgressItem::Progress(_))) => {}
+                Ok(Some(GetProgressItem::Progress(offset))) => {
+                    on_progress(offset, conn_is_relayed(&route_conn));
+                }
             }
         }
     }
@@ -89,4 +170,15 @@ pub async fn fetch_to(store: &FsStore, conn: Connection, hash: Hash, dest: &Path
         .await
         .with_context(|| format!("export to {}", dest.display()))?;
     Ok(())
+}
+
+/// Whether the connection's active path currently runs through the relay (vs. a
+/// direct hole-punched path). Used for the transfer's direct/relayed badge.
+fn conn_is_relayed(conn: &Connection) -> bool {
+    let paths = conn.paths();
+    if let Some(p) = paths.iter().find(|p| p.is_selected()) {
+        return p.is_relay();
+    }
+    // No explicitly-selected path: relayed only if there's no direct IP path at all.
+    !paths.iter().any(|p| p.is_ip())
 }

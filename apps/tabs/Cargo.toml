@@ -21,6 +21,8 @@ unsafe_code = "forbid"
 mesh-engine = { path = "../../mesh-engine" }
 mesh-mcp = { path = "../../mesh-mcp" }
 serde_json.workspace = true
+# Stable per-tab ids (so the GUI can list + remove individual tabs).
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

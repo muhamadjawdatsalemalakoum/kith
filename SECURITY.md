@@ -6,18 +6,30 @@ read this before reporting.
 ## Status: alpha — not independently audited
 
 Kith is **alpha** software. It is built on well-known building blocks (iroh
-QUIC/TLS 1.3 transport, SPAKE2 pairing, HMAC-SHA256 authentication, and
-XChaCha20-Poly1305 at-rest encryption) and is covered by local tests, but it has
-**not** had an independent security review, and `spake2 0.4` is itself unreviewed.
+QUIC/TLS 1.3 transport, SPAKE2 pairing, HMAC-SHA256 group-key authentication, and
+XChaCha20-Poly1305 at-rest encryption) and is covered by tests, but it has **not**
+had an independent security review, and `spake2 0.4` is itself unreviewed.
 
-Current limitations (also noted in the [README](README.md#security-status)):
+What's enforced (with tests):
 
-- The at-rest encryption key is stored in a `0600`-permissioned file in the data
-  directory. This guards against a stray copy of the data file, but not against
-  someone who already has full read access to the directory. Moving the key into an
-  OS keychain / passphrase is planned.
-- Removing a device is a manual step (rotate the group key, then re-pair). Data a
-  device synced before removal is not retroactively protected.
+- Both **document sync and file transfer** require a mutual group-key proof — a peer
+  that can't prove the shared key is refused before any byte flows
+  (`wrong_group_key_cannot_sync`, `stranger_cannot_fetch_blob`).
+- Pairing derives the group key from a short code via SPAKE2 with a mandatory,
+  constant-time key-confirmation round; a wrong code hands out nothing.
+- The replica is encrypted at rest (XChaCha20-Poly1305).
+
+Current limitations:
+
+- The at-rest and group keys are stored in files in the data directory (`0600` on
+  Unix; an ACL restricted to the current user on Windows). This guards a stray copy,
+  but not someone who already has full read access to the directory. Moving the keys
+  into an OS keychain / a passphrase is planned.
+- **Revocation:** "Reset & re-key" rotates the group key so removed devices can no
+  longer authenticate, and you re-pair the ones you keep. There is no forward secrecy
+  for data a device already synced before removal.
+- `spake2 0.4` is unaudited and not constant-time; pairing depends on it (mitigated by
+  the mandatory confirmation round, but it's a residual risk).
 - Real-network NAT traversal and live DHT/relay behavior are checked by hand rather
   than in CI.
 

@@ -11,7 +11,7 @@
 #   - apps/mcp        an MCP app (later)
 [workspace]
 resolver = "2"
-members = ["mesh-engine", "mesh-mcp", "apps/tabs", "apps/memory"]
+members = ["mesh-engine", "mesh-mcp", "apps/tabs", "apps/memory", "apps/files", "apps/desktop"]
 
 [workspace.package]
 version = "0.0.1"

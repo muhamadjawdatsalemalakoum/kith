@@ -127,25 +127,37 @@ async fn dispatch<A: McpApp>(app: &A, method: &str, params: Value) -> Result<Val
     }
 }
 
-/// Run the MCP server over stdio (the standard MCP local transport): read
-/// newline-delimited JSON-RPC from stdin, write responses to stdout. Blocks until
-/// stdin closes.
-pub async fn serve_stdio<A: McpApp>(app: A) -> anyhow::Result<()> {
+/// Run the MCP server over any newline-delimited byte stream: read JSON-RPC requests
+/// from `reader`, write responses to `writer`. Blocks until the reader closes. This is
+/// the transport-agnostic core; [`serve_stdio`] wraps stdin/stdout and a local TCP
+/// bridge wraps a socket.
+pub async fn serve_stream<A, R, W>(app: A, reader: R, mut writer: W) -> anyhow::Result<()>
+where
+    A: McpApp,
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut out = tokio::io::stdout();
+    let mut lines = BufReader::new(reader).lines();
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
         }
         if let Some(resp) = handle_line(&app, &line).await {
-            out.write_all(resp.as_bytes()).await?;
-            out.write_all(b"\n").await?;
-            out.flush().await?;
+            writer.write_all(resp.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+            writer.flush().await?;
         }
     }
     Ok(())
+}
+
+/// Run the MCP server over stdio (the standard MCP local transport): read
+/// newline-delimited JSON-RPC from stdin, write responses to stdout. Blocks until
+/// stdin closes.
+pub async fn serve_stdio<A: McpApp>(app: A) -> anyhow::Result<()> {
+    serve_stream(app, tokio::io::stdin(), tokio::io::stdout()).await
 }
 
 #[cfg(test)]

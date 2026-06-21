@@ -28,7 +28,15 @@ async fn pair_a_new_device_then_sync() {
 
     // Pair: A arms with a code; B joins with the same code and adopts A's group key.
     a.arm_pairing(b"hunter2");
+    let b_id = b.endpoint_id();
     b.pair_with(a.endpoint_addr(), b"hunter2").await.unwrap();
+    // The HOST learns the joiner's id (bidirectional pairing) so it can peer back —
+    // without this the host would never dial the joiner.
+    assert_eq!(
+        a.take_joined().as_deref(),
+        Some(b_id.as_str()),
+        "host learns the joiner's endpoint id during pairing"
+    );
     b.shutdown().await.unwrap();
 
     // B restarts (loading the adopted group key) and now syncs successfully.

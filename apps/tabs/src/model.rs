@@ -10,6 +10,14 @@ use mesh_engine::automerge::transaction::Transactable;
 use mesh_engine::automerge::{ObjType, ReadDoc, ScalarValue, Value, ROOT};
 use mesh_engine::{Result, SharedDoc};
 
+/// One saved tab.
+#[derive(Debug, Clone)]
+pub struct Tab {
+    pub id: String,
+    pub url: String,
+    pub title: String,
+}
+
 /// Seed an example space/group/tab so the schema is exercised end to end.
 pub async fn seed_example(doc: &SharedDoc) -> Result<()> {
     let mut guard = doc.lock().await;
@@ -29,7 +37,9 @@ pub async fn seed_example(doc: &SharedDoc) -> Result<()> {
 }
 
 /// Add a tab to the default space/group, creating the path if it doesn't exist yet.
-pub async fn add_tab(doc: &SharedDoc, url: &str, title: &str) -> Result<()> {
+/// Returns the new tab's id.
+pub async fn add_tab(doc: &SharedDoc, url: &str, title: &str) -> Result<String> {
+    let id = uuid::Uuid::new_v4().to_string();
     let mut guard = doc.lock().await;
     let mut tx = guard.transaction();
     let spaces = match tx.get(ROOT, "spaces")? {
@@ -62,10 +72,99 @@ pub async fn add_tab(doc: &SharedDoc, url: &str, title: &str) -> Result<()> {
     };
     let idx = tx.length(&tabs);
     let tab = tx.insert_object(&tabs, idx, ObjType::Map)?;
+    tx.put(&tab, "id", id.as_str())?;
     tx.put(&tab, "url", url)?;
     tx.put(&tab, "title", title)?;
     tx.commit();
-    Ok(())
+    Ok(id)
+}
+
+/// All non-forgotten tabs across every group in the default space, oldest first.
+pub async fn all_tabs(doc: &SharedDoc) -> Vec<Tab> {
+    let guard = doc.lock().await;
+    let mut out = Vec::new();
+    let Some((_, spaces)) = guard.get(ROOT, "spaces").ok().flatten() else {
+        return out;
+    };
+    let Some((_, space)) = guard.get(&spaces, "space-1").ok().flatten() else {
+        return out;
+    };
+    let Some((_, groups)) = guard.get(&space, "groups").ok().flatten() else {
+        return out;
+    };
+    let field = |obj: &mesh_engine::automerge::ObjId, key: &str| -> String {
+        match guard.get(obj, key) {
+            Ok(Some((Value::Scalar(s), _))) => match s.as_ref() {
+                ScalarValue::Str(t) => t.to_string(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        }
+    };
+    for g in 0..guard.length(&groups) {
+        let Ok(Some((_, group))) = guard.get(&groups, g) else {
+            continue;
+        };
+        let Ok(Some((_, tabs))) = guard.get(&group, "tabs") else {
+            continue;
+        };
+        for t in 0..guard.length(&tabs) {
+            let Ok(Some((_, tab))) = guard.get(&tabs, t) else {
+                continue;
+            };
+            let deleted = matches!(
+                guard.get(&tab, "deleted"),
+                Ok(Some((Value::Scalar(s), _))) if matches!(s.as_ref(), ScalarValue::Boolean(true))
+            );
+            if deleted {
+                continue;
+            }
+            out.push(Tab {
+                id: field(&tab, "id"),
+                url: field(&tab, "url"),
+                title: field(&tab, "title"),
+            });
+        }
+    }
+    out
+}
+
+/// Forget a tab by id (tombstone — a conflict-free delete). Returns whether found.
+pub async fn remove_tab(doc: &SharedDoc, id: &str) -> Result<bool> {
+    let mut guard = doc.lock().await;
+    let mut tx = guard.transaction();
+    let Some((_, spaces)) = tx.get(ROOT, "spaces")? else {
+        return Ok(false);
+    };
+    let Some((_, space)) = tx.get(&spaces, "space-1")? else {
+        return Ok(false);
+    };
+    let Some((_, groups)) = tx.get(&space, "groups")? else {
+        return Ok(false);
+    };
+    for g in 0..tx.length(&groups) {
+        let Some((_, group)) = tx.get(&groups, g)? else {
+            continue;
+        };
+        let Some((_, tabs)) = tx.get(&group, "tabs")? else {
+            continue;
+        };
+        for t in 0..tx.length(&tabs) {
+            let Some((_, tab)) = tx.get(&tabs, t)? else {
+                continue;
+            };
+            let is_match = matches!(
+                tx.get(&tab, "id")?,
+                Some((Value::Scalar(s), _)) if matches!(s.as_ref(), ScalarValue::Str(t) if t.as_str() == id)
+            );
+            if is_match {
+                tx.put(&tab, "deleted", true)?;
+                tx.commit();
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// How many tabs are saved across ALL groups in the default space.
@@ -88,7 +187,18 @@ pub async fn count_tabs(doc: &SharedDoc) -> u64 {
     for g in 0..guard.length(&groups) {
         if let Ok(Some((_, group))) = guard.get(&groups, g) {
             if let Ok(Some((_, tabs))) = guard.get(&group, "tabs") {
-                total += guard.length(&tabs) as u64;
+                for t in 0..guard.length(&tabs) {
+                    let Ok(Some((_, tab))) = guard.get(&tabs, t) else {
+                        continue;
+                    };
+                    let deleted = matches!(
+                        guard.get(&tab, "deleted"),
+                        Ok(Some((Value::Scalar(s), _))) if matches!(s.as_ref(), ScalarValue::Boolean(true))
+                    );
+                    if !deleted {
+                        total += 1;
+                    }
+                }
             }
         }
     }

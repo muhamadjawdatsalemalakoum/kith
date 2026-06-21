@@ -15,7 +15,7 @@
 
 mod model;
 
-use mesh_engine::{CoreConfig, EndpointAddr, Mesh, Result};
+use mesh_engine::{endpoint_addr_from_id, CoreConfig, CoreError, EndpointAddr, Mesh, Result};
 pub use model::Entry;
 
 /// Re-exported so callers can configure the engine without a direct dependency.
@@ -32,6 +32,12 @@ impl Memory {
         Ok(Memory {
             mesh: Mesh::start(config).await?,
         })
+    }
+
+    /// Wrap an already-running engine handle so several apps can share ONE mesh —
+    /// one identity, one pairing, one replica. `Mesh` is cheap to clone (`Arc`).
+    pub fn from_mesh(mesh: Mesh) -> Memory {
+        Memory { mesh }
     }
 
     /// This device's stable identity / connectable address.
@@ -53,6 +59,50 @@ impl Memory {
     /// Wait for a relay-reachable address (relay-backed modes).
     pub async fn online(&self) {
         self.mesh.online().await
+    }
+
+    // ---- device linking (pairing) ----
+
+    /// Enter "add a device" mode on THIS device: answer one pairing attempt that
+    /// presents `code` and hand over the group key, then disarm. Show `code` (or an
+    /// invite carrying it) to the user. Pair with [`Memory::pair_with_host`].
+    pub fn arm_pairing(&self, code: &str) {
+        self.mesh.arm_pairing(code.as_bytes());
+    }
+
+    /// Leave "add a device" mode without completing a pairing (e.g. cancelled).
+    pub fn disarm_pairing(&self) {
+        self.mesh.disarm_pairing();
+    }
+
+    /// Join the group hosted by `host_id` using the shared `code`. Persists the group
+    /// key; the caller should restart this peer (drop + [`Memory::start`]) to adopt it.
+    /// Time-boxed so an offline host fails cleanly instead of hanging.
+    pub async fn pair_with_host(&self, host_id: &str, code: &str) -> Result<()> {
+        let host = endpoint_addr_from_id(host_id)?;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            self.mesh.pair_with(host, code.as_bytes()),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => Err(CoreError::Pairing(
+                "couldn't reach the other device — make sure it's showing a code and online".into(),
+            )),
+        }
+    }
+
+    /// Keep this memory converged with a device addressed by its id (discovery
+    /// resolves the paths). Call for each linked device on startup.
+    pub async fn add_device_by_id(&self, id: &str) -> Result<()> {
+        self.add_device(endpoint_addr_from_id(id)?).await;
+        Ok(())
+    }
+
+    /// Rotate the group key (revoke access). Restart, then re-pair the devices you keep.
+    pub fn rotate_group_key(&self) -> Result<[u8; 32]> {
+        self.mesh.rotate_group_key()
     }
 
     /// Remember something. Returns the entry id.
