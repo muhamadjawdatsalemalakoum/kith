@@ -297,11 +297,20 @@ impl ProtocolHandler for SyncDispatcher {
             // Not a Space this device is in — refuse before any auth/merge.
             return Err(acc_err("unknown space"));
         };
-        space
-            .sync()
-            .respond_streams(conn, send, recv)
-            .await
-            .map_err(acc_err)?;
+        // Role-enforced Spaces use the verified path (EndpointId gate + per-change
+        // signature verification); permissive Spaces use the plain Automerge sync.
+        if space.enforced() {
+            space
+                .respond_verified(conn, send, recv)
+                .await
+                .map_err(acc_err)?;
+        } else {
+            space
+                .sync()
+                .respond_streams(conn, send, recv)
+                .await
+                .map_err(acc_err)?;
+        }
         Ok(())
     }
 }

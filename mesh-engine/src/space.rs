@@ -23,10 +23,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::SystemTime;
 
-use automerge::ActorId;
-use iroh::endpoint::Connection;
+use automerge::{ActorId, Change, ChangeHash};
+use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::AcceptError;
-use iroh::{EndpointAddr, EndpointId};
+use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey, Signature};
 use iroh_blobs::api::TempTag;
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::{BlobsProtocol, Hash};
@@ -34,9 +34,16 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::doc::SharedDoc;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
+use crate::membership::{Membership, Role};
 use crate::sync::MeshSync;
 use crate::{atrest, blobs, doc, keys};
+
+/// Domain label binding a per-change signature to its Space (so a signature can't be
+/// replayed onto a change of the same hash in another Space).
+const CHANGE_SIG_DOMAIN: &[u8] = b"kith change sig v1";
+/// Hard cap on a verified-sync frame (membership log / heads / change batch).
+const MAX_VERIFIED_FRAME: usize = 32 * 1024 * 1024;
 
 /// Stable, public identifier for a Space. 32 bytes; safe to put on the wire (it is a
 /// hash, never the secret group key). Displayed/parsed as lowercase hex.
@@ -140,6 +147,19 @@ pub(crate) struct SpaceState {
     sync: Arc<MeshSync>,
     store: FsStore,
     blobs_protocol: BlobsProtocol,
+    /// This device's Ed25519 secret (the global `node.key`), kept for signing changes
+    /// and membership ops in enforced Spaces. Reconstructed via [`SpaceState::secret`].
+    secret_bytes: [u8; 32],
+    /// Present iff this Space enforces roles: a signed, hash-chained membership log
+    /// rooting trust in EndpointIds. `None` ⇒ a permissive Space (the default / M1
+    /// behaviour: any group-key holder is a full writer).
+    membership: Option<StdMutex<Membership>>,
+    /// Per-change author signatures keyed by change hash, so a Reader's (or a
+    /// non-member's) writes are rejected by honest peers and authorized changes can be
+    /// relayed (carry-forward). Only populated for enforced Spaces.
+    sigs: StdMutex<SigStore>,
+    /// Heads up to which our own local changes have been signed.
+    signed_heads: Mutex<Vec<ChangeHash>>,
     /// Temp tags for files we serve in this Space, held so blobs aren't GC'd.
     kept_tags: Mutex<Vec<TempTag>>,
     /// Peers this Space keeps converged with.
@@ -159,6 +179,7 @@ impl SpaceState {
         dir: PathBuf,
         id: SpaceId,
         actor: ActorId,
+        secret_bytes: [u8; 32],
         configured_key: Option<[u8; 32]>,
     ) -> Result<SpaceState> {
         std::fs::create_dir_all(&dir)?;
@@ -180,6 +201,11 @@ impl SpaceState {
         let (merged_tx, _merged_rx) = mpsc::channel::<automerge::Automerge>(16);
         let sync = MeshSync::with_shared(doc.clone(), group_key, id, merged_tx);
 
+        // Enforced iff a verified membership log is present (created via
+        // `create_space_with_roles` / `join_space_with_roles`).
+        let membership = Membership::open(id, dir.join("members.log"))?.map(StdMutex::new);
+        let sigs = SigStore::load(dir.join("sigs.bin"));
+
         Ok(SpaceState {
             id,
             name,
@@ -190,10 +216,108 @@ impl SpaceState {
             sync,
             store,
             blobs_protocol,
+            secret_bytes,
+            membership,
+            sigs: StdMutex::new(sigs),
+            signed_heads: Mutex::new(Vec::new()),
             kept_tags: Mutex::new(Vec::new()),
             peers: Mutex::new(Vec::new()),
             last_sync: StdMutex::new(HashMap::new()),
         })
+    }
+
+    /// This device's Ed25519 secret, reconstructed for signing.
+    fn secret(&self) -> SecretKey {
+        SecretKey::from_bytes(&self.secret_bytes)
+    }
+
+    /// This device's EndpointId bytes (its public key).
+    pub(crate) fn my_endpoint(&self) -> [u8; 32] {
+        let mut a = [0u8; 32];
+        a.copy_from_slice(self.secret().public().as_bytes());
+        a
+    }
+
+    /// Whether this Space enforces EndpointId membership + roles.
+    pub(crate) fn enforced(&self) -> bool {
+        self.membership.is_some()
+    }
+
+    /// This device's role in this Space (`None` if permissive or not a member).
+    pub(crate) fn my_role(&self) -> Option<Role> {
+        let me = self.my_endpoint();
+        self.membership
+            .as_ref()?
+            .lock()
+            .expect("membership lock")
+            .state()
+            .role_of(&me)
+    }
+
+    /// Whether `endpoint` is a member at the current epoch (permissive ⇒ always true).
+    pub(crate) fn is_member(&self, endpoint: &[u8; 32]) -> bool {
+        match &self.membership {
+            None => true,
+            Some(m) => m
+                .lock()
+                .expect("membership lock")
+                .state()
+                .is_member(endpoint),
+        }
+    }
+
+    /// Whether `endpoint` may author accepted writes (permissive ⇒ always true).
+    fn is_writer(&self, endpoint: &[u8; 32]) -> bool {
+        match &self.membership {
+            None => true,
+            Some(m) => m
+                .lock()
+                .expect("membership lock")
+                .state()
+                .is_writer(endpoint),
+        }
+    }
+
+    /// `(endpoint-id string, role)` for every current member (enforced Spaces only).
+    pub(crate) fn members(&self) -> Vec<(String, Role)> {
+        let Some(m) = &self.membership else {
+            return Vec::new();
+        };
+        m.lock()
+            .expect("membership lock")
+            .state()
+            .members()
+            .into_iter()
+            .filter_map(|(ep, role)| {
+                PublicKey::from_bytes(&ep)
+                    .ok()
+                    .map(|pk| (pk.to_string(), role))
+            })
+            .collect()
+    }
+
+    /// Serialize this Space's membership log (to seed another device).
+    pub(crate) fn membership_blob(&self) -> Option<Vec<u8>> {
+        self.membership
+            .as_ref()
+            .map(|m| m.lock().expect("membership lock").serialize())
+    }
+
+    /// Append an Admin-signed membership op (add / set-role / remove). Errors if this
+    /// Space is permissive or this device is not an Admin.
+    pub(crate) fn membership_op(&self, op: MemberOp) -> Result<()> {
+        let Some(m) = &self.membership else {
+            return Err(CoreError::Other(anyhow::anyhow!(
+                "this Space does not enforce roles"
+            )));
+        };
+        let secret = self.secret();
+        let mut guard = m.lock().expect("membership lock");
+        match op {
+            MemberOp::Add(ep, role) => guard.add_member(&secret, ep, role),
+            MemberOp::SetRole(ep, role) => guard.set_role(&secret, ep, role),
+            MemberOp::Remove(ep) => guard.remove_member(&secret, ep),
+        }
     }
 
     pub(crate) fn id(&self) -> SpaceId {
@@ -293,8 +417,15 @@ impl SpaceState {
             .unwrap_or_default()
     }
 
-    /// Import a file into this Space's content store and keep it served.
+    /// Import a file into this Space's content store and keep it served. In an enforced
+    /// Space, blob *serving* (`files.share`) is gated to `Writer`/`Admin` — a `Reader`
+    /// may fetch but not offer.
     pub(crate) async fn share_file(&self, path: &Path) -> Result<Hash> {
+        if self.enforced() && !self.my_role().map(Role::can_write).unwrap_or(false) {
+            return Err(CoreError::Other(anyhow::anyhow!(
+                "your role in this Space is read-only; you cannot share files"
+            )));
+        }
         let tt = blobs::add_file(&self.store, path).await?;
         let hash = tt.hash();
         self.kept_tags.lock().await.push(tt);
@@ -335,6 +466,314 @@ impl SpaceState {
         let _ = self.save().await;
         let _ = self.store.shutdown().await;
     }
+
+    // ---------------------------------------------------------- role-enforced sync
+
+    /// Sign any new *local-authored* changes so we can attest them to peers. Idempotent;
+    /// a no-op for permissive Spaces.
+    async fn sign_local_changes(&self) {
+        if !self.enforced() {
+            return;
+        }
+        let me = self.my_endpoint();
+        let secret = self.secret();
+        let from = self.signed_heads.lock().await.clone();
+        let (changes, heads) = {
+            let doc = self.doc.lock().await;
+            (doc.get_changes(&from), doc.get_heads())
+        };
+        {
+            let mut sigs = self.sigs.lock().expect("sigs lock");
+            let mut added = false;
+            for c in &changes {
+                let h = c.hash().0;
+                if c.actor_id().to_bytes() == me.as_slice() && !sigs.has(&h) {
+                    let sig = secret.sign(&change_sign_input(&self.id, &h));
+                    sigs.put(h, sig.to_bytes());
+                    added = true;
+                }
+            }
+            if added {
+                sigs.persist();
+            }
+        }
+        *self.signed_heads.lock().await = heads;
+    }
+
+    /// Membership gate: refuse a peer whose TLS-authenticated EndpointId is not a member
+    /// of this Space — even if it proved the group key. No-op for permissive Spaces.
+    fn gate(&self, conn: &Connection) -> Result<()> {
+        if !self.enforced() {
+            return Ok(());
+        }
+        let mut remote = [0u8; 32];
+        remote.copy_from_slice(conn.remote_id().as_bytes());
+        if !self.is_member(&remote) {
+            return Err(CoreError::Sync("peer is not a member of this Space".into()));
+        }
+        Ok(())
+    }
+
+    /// Initiator side of role-enforced sync: name the Space, prove the group key, pass
+    /// the membership gate, then run the verified exchange.
+    pub(crate) async fn initiate_verified(&self, conn: Connection) -> Result<()> {
+        let (mut send, mut recv) = conn.open_bi().await.map_err(sync_err)?;
+        send.write_all(self.id.as_bytes()).await.map_err(sync_err)?;
+        crate::auth::initiator(&self.group_key, &mut send, &mut recv).await?;
+        self.gate(&conn)?;
+        self.verified_exchange(&mut send, &mut recv).await?;
+        conn.close(0u32.into(), b"bye");
+        Ok(())
+    }
+
+    /// Responder side: the dispatcher has read the SpaceId; prove the group key, gate on
+    /// membership, then run the verified exchange.
+    pub(crate) async fn respond_verified(
+        &self,
+        conn: Connection,
+        mut send: SendStream,
+        mut recv: RecvStream,
+    ) -> Result<()> {
+        crate::auth::responder(&self.group_key, &mut send, &mut recv).await?;
+        self.gate(&conn)?;
+        self.verified_exchange(&mut send, &mut recv).await?;
+        conn.closed().await;
+        Ok(())
+    }
+
+    /// The symmetric verified exchange (both sides run the same steps): swap the signed
+    /// membership log, swap heads, then push the changes the peer lacks — each carrying
+    /// its author's signature — and apply only the peer's *authorized* changes.
+    async fn verified_exchange(&self, send: &mut SendStream, recv: &mut RecvStream) -> Result<()> {
+        self.sign_local_changes().await;
+
+        // 1. Membership log: swap + merge so both agree on roles before judging changes.
+        let our_mem = self.membership_blob().unwrap_or_default();
+        write_frame(send, &our_mem).await?;
+        let their_mem = read_frame(recv).await?;
+        self.merge_membership_bytes(&their_mem)?;
+
+        // 2. Heads.
+        let our_heads = { self.doc.lock().await.get_heads() };
+        write_frame(send, &serialize_heads(&our_heads)).await?;
+        let their_heads = parse_heads(&read_frame(recv).await?);
+
+        // 3. Signed change push (both directions, so both converge in one round).
+        let push = self.build_change_push(&their_heads).await;
+        write_frame(send, &push).await?;
+        let their_push = read_frame(recv).await?;
+        self.apply_verified_push(&their_push).await?;
+
+        // 4. Apply barrier: each side acks only AFTER applying, so a caller that syncs
+        // then immediately reads the peer's replica sees the result. (Automerge's plain
+        // message loop self-synchronises; this custom protocol must do it explicitly.)
+        write_frame(send, &[1u8]).await?;
+        let _ = read_frame(recv).await?;
+        Ok(())
+    }
+
+    /// Merge a peer's membership log into ours (enforced Spaces only).
+    fn merge_membership_bytes(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if let Some(m) = &self.membership {
+            m.lock().expect("membership lock").merge(bytes)?;
+        }
+        Ok(())
+    }
+
+    /// The wire batch of changes the peer lacks, each tagged with its author signature.
+    async fn build_change_push(&self, their_heads: &[ChangeHash]) -> Vec<u8> {
+        let changes = { self.doc.lock().await.get_changes(their_heads) };
+        let sigs = self.sigs.lock().expect("sigs lock");
+        let mut out = Vec::new();
+        out.extend_from_slice(&(changes.len() as u32).to_le_bytes());
+        for c in &changes {
+            let raw = c.raw_bytes();
+            let sig = sigs.get(&c.hash().0).unwrap_or([0u8; 64]);
+            out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+            out.extend_from_slice(raw);
+            out.extend_from_slice(&sig);
+        }
+        out
+    }
+
+    /// Verify + apply a peer's change push: keep only changes whose author signature is
+    /// valid AND whose author is a `Writer`/`Admin` at the current epoch; drop the rest.
+    /// This is the cryptographic read-only enforcement — a `Reader` (or a leaked-key
+    /// non-member) cannot get a write accepted by an honest peer.
+    async fn apply_verified_push(&self, buf: &[u8]) -> Result<()> {
+        let Some(head) = buf.get(0..4) else {
+            return Ok(());
+        };
+        let count = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        let mut pos = 4usize;
+        let mut verified: Vec<Change> = Vec::new();
+        let mut new_sigs: Vec<([u8; 32], [u8; 64])> = Vec::new();
+        for _ in 0..count {
+            let Some(lenb) = buf.get(pos..pos + 4) else {
+                break;
+            };
+            let clen = u32::from_le_bytes([lenb[0], lenb[1], lenb[2], lenb[3]]) as usize;
+            pos += 4;
+            let Some(cb) = buf.get(pos..pos + clen) else {
+                break;
+            };
+            pos += clen;
+            let Some(sigb) = buf.get(pos..pos + 64) else {
+                break;
+            };
+            pos += 64;
+            let Ok(change) = Change::from_bytes(cb.to_vec()) else {
+                continue;
+            };
+            let author = change.actor_id().to_bytes();
+            if author.len() != 32 {
+                continue;
+            }
+            let mut author32 = [0u8; 32];
+            author32.copy_from_slice(author);
+            let h = change.hash().0;
+            let Ok(pk) = PublicKey::from_bytes(&author32) else {
+                continue;
+            };
+            let mut sig = [0u8; 64];
+            sig.copy_from_slice(sigb);
+            if pk
+                .verify(
+                    &change_sign_input(&self.id, &h),
+                    &Signature::from_bytes(&sig),
+                )
+                .is_err()
+            {
+                continue; // forged / unsigned change
+            }
+            if !self.is_writer(&author32) {
+                continue; // Reader / non-member author — rejected by honest peers
+            }
+            verified.push(change);
+            new_sigs.push((h, sig));
+        }
+        if verified.is_empty() {
+            return Ok(());
+        }
+        {
+            let mut doc = self.doc.lock().await;
+            doc.apply_changes(verified)
+                .map_err(|e| CoreError::Sync(e.to_string()))?;
+        }
+        {
+            let mut sigs = self.sigs.lock().expect("sigs lock");
+            for (h, sig) in new_sigs {
+                sigs.put(h, sig);
+            }
+            sigs.persist();
+        }
+        Ok(())
+    }
+}
+
+/// A membership change requested through the engine API (`Mesh::add_member`, etc.).
+pub(crate) enum MemberOp {
+    Add([u8; 32], Role),
+    SetRole([u8; 32], Role),
+    Remove([u8; 32]),
+}
+
+/// Per-change author signatures, persisted to `sigs.bin` as `[hash(32) || sig(64)]*`.
+struct SigStore {
+    path: PathBuf,
+    map: HashMap<[u8; 32], [u8; 64]>,
+}
+
+impl SigStore {
+    fn load(path: PathBuf) -> SigStore {
+        let mut map = HashMap::new();
+        if let Ok(bytes) = std::fs::read(&path) {
+            for chunk in bytes.chunks_exact(96) {
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&chunk[..32]);
+                let mut s = [0u8; 64];
+                s.copy_from_slice(&chunk[32..]);
+                map.insert(h, s);
+            }
+        }
+        SigStore { path, map }
+    }
+    fn has(&self, h: &[u8; 32]) -> bool {
+        self.map.contains_key(h)
+    }
+    fn get(&self, h: &[u8; 32]) -> Option<[u8; 64]> {
+        self.map.get(h).copied()
+    }
+    fn put(&mut self, h: [u8; 32], sig: [u8; 64]) {
+        self.map.insert(h, sig);
+    }
+    fn persist(&self) {
+        let mut out = Vec::with_capacity(self.map.len() * 96);
+        for (h, s) in &self.map {
+            out.extend_from_slice(h);
+            out.extend_from_slice(s);
+        }
+        let tmp = self.path.with_extension("bin.tmp");
+        if std::fs::write(&tmp, &out).is_ok() {
+            let _ = std::fs::rename(&tmp, &self.path);
+        }
+    }
+}
+
+/// What an author signs for a change: domain || space || change-hash. Binding the Space
+/// stops a valid signature being replayed onto an identical change in another Space.
+fn change_sign_input(space_id: &SpaceId, change_hash: &[u8; 32]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(CHANGE_SIG_DOMAIN.len() + 64);
+    v.extend_from_slice(CHANGE_SIG_DOMAIN);
+    v.extend_from_slice(space_id.as_bytes());
+    v.extend_from_slice(change_hash);
+    v
+}
+
+fn serialize_heads(heads: &[ChangeHash]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(heads.len() * 32);
+    for h in heads {
+        v.extend_from_slice(&h.0);
+    }
+    v
+}
+
+fn parse_heads(bytes: &[u8]) -> Vec<ChangeHash> {
+    bytes
+        .chunks_exact(32)
+        .map(|c| {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(c);
+            ChangeHash(a)
+        })
+        .collect()
+}
+
+async fn write_frame(send: &mut SendStream, data: &[u8]) -> Result<()> {
+    send.write_all(&(data.len() as u32).to_le_bytes())
+        .await
+        .map_err(sync_err)?;
+    send.write_all(data).await.map_err(sync_err)?;
+    Ok(())
+}
+
+async fn read_frame(recv: &mut RecvStream) -> Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    recv.read_exact(&mut len).await.map_err(sync_err)?;
+    let n = u32::from_le_bytes(len) as usize;
+    if n > MAX_VERIFIED_FRAME {
+        return Err(CoreError::Sync(format!("verified frame too large: {n}")));
+    }
+    let mut buf = vec![0u8; n];
+    recv.read_exact(&mut buf).await.map_err(sync_err)?;
+    Ok(buf)
+}
+
+fn sync_err(e: impl std::fmt::Display) -> CoreError {
+    CoreError::Sync(e.to_string())
 }
 
 /// Monotonic counter for unique save temp-file names (avoids concurrent-save clobber).

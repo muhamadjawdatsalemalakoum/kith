@@ -184,10 +184,24 @@ and never leak into B.
   `migrates_flat_layout_into_default_space` — plus every prior test still green, and the
   relay-path test. `clippy -D warnings` + `fmt` clean; `forbid(unsafe_code)` intact.
 
-### EV2-M2 — Per-device identity, membership & roles · ⬜ NEXT
-Membership rooted in **EndpointId** (not mere possession of the shared key), with signed
-membership changes and enforceable `Admin` / `Writer` / `Reader` roles (cryptographic
-read-only against honest peers via per-writer change signing).
+### EV2-M2 — Per-device identity, membership & roles · ✅ DONE
+Membership rooted in **EndpointId**, not mere possession of the shared key. A Space can
+be created with roles (`create_space_with_roles`); its **signed, hash-chained membership
+log** has a root **Admin** cryptographically bound to the SpaceId, and replaying it
+yields the `Admin`/`Writer`/`Reader` map.
+- **EndpointId gate:** the sync + blob handlers refuse a peer whose TLS-authenticated
+  EndpointId isn't a member — even with a leaked group key.
+- **Cryptographic read-only:** each Automerge change carries its author's Ed25519
+  signature (reusing the device `node.key`); honest peers apply a change only if its
+  author is a `Writer`/`Admin` at the current epoch, so a Reader's writes are rejected.
+  Role-enforced Spaces use a verified sync protocol (signed change push + apply barrier)
+  in place of plain Automerge bloom-sync; permissive/default Spaces are unchanged.
+- **API:** `add_member` / `set_member_role` / `remove_member` / `members` / `my_role` /
+  `space_membership_blob` / `join_space_with_roles`; blob serving gated to Writer/Admin.
+- **Tests:** `reader_write_rejected`, `non_member_endpointid_rejected_even_with_group_key`,
+  `admin_can_add_and_promote`, `membership_change_requires_admin`,
+  `writer_can_write_reader_cannot_share_blob`, plus the `membership` unit tests
+  (genesis/replay, forged-entry rejection, tamper detection, merge).
 
 ### EV2-M3 — Revocation, key epochs & audit log · ⬜
 Epoch rekey on device removal (post-removal confidentiality for future data — **not**

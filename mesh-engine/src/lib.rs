@@ -34,6 +34,7 @@ mod endpoint;
 mod error;
 mod identity;
 mod keys;
+mod membership;
 mod pair;
 pub mod pairing;
 mod space;
@@ -61,11 +62,12 @@ pub use iroh_blobs::Hash;
 pub use config::{CoreConfig, Infra};
 pub use doc::SharedDoc;
 pub use error::{CoreError, Result};
+pub use membership::Role;
 pub use space::{SpaceId, SpaceInfo};
 pub use sync::MeshSync;
 
 use pair::ArmedPairing;
-use space::{SpaceRegistry, SpaceState};
+use space::{MemberOp, SpaceRegistry, SpaceState};
 
 /// ALPN for the engine's mesh sync protocol.
 pub const MESH_ALPN: &[u8] = b"mesh-engine/sync/1";
@@ -92,6 +94,9 @@ struct Inner {
     actor: ActorId,
     /// This device's public key bytes — the founding key for [`SpaceId::new`].
     device_pubkey: [u8; 32],
+    /// This device's Ed25519 secret bytes (`node.key`), for signing changes and
+    /// membership ops in enforced Spaces.
+    device_secret: [u8; 32],
     /// The Space the bare [`Mesh`] methods operate on (default until changed).
     active: StdMutex<SpaceId>,
     /// Pinged on a local change, a new peer, or a new Space to wake the sync loop.
@@ -127,6 +132,7 @@ impl Mesh {
             a.copy_from_slice(pk.as_bytes());
             a
         };
+        let device_secret = secret.to_bytes();
 
         // Spaces live under `data_dir/spaces/<id>/`. Migrate any pre-Spaces flat layout
         // (a single-group install) into the default Space the first time.
@@ -139,8 +145,14 @@ impl Mesh {
         let default_dir = spaces_root.join(default_id.to_hex());
         // The default Space adopts the config's explicit key (tests / a just-paired key
         // on restart) or loads/generates its own. Other Spaces load from disk.
-        let default_space =
-            SpaceState::open(default_dir, default_id, actor.clone(), config.group_key).await?;
+        let default_space = SpaceState::open(
+            default_dir,
+            default_id,
+            actor.clone(),
+            device_secret,
+            config.group_key,
+        )
+        .await?;
         registry.insert(default_space);
 
         if let Ok(rd) = std::fs::read_dir(&spaces_root) {
@@ -157,7 +169,8 @@ impl Mesh {
                 if id == default_id {
                     continue;
                 }
-                let state = SpaceState::open(entry.path(), id, actor.clone(), None).await?;
+                let state =
+                    SpaceState::open(entry.path(), id, actor.clone(), device_secret, None).await?;
                 registry.insert(state);
             }
         }
@@ -195,6 +208,7 @@ impl Mesh {
             data_dir: config.data_dir.clone(),
             actor,
             device_pubkey,
+            device_secret,
             active: StdMutex::new(default_id),
             changed,
             pair_armed,
@@ -245,7 +259,14 @@ impl Mesh {
         std::fs::create_dir_all(&dir)?;
         keys::write_key(&dir.join("group.key"), &group_key)?;
         let _ = space::write_name(&dir, name);
-        let state = SpaceState::open(dir, id, self.inner.actor.clone(), None).await?;
+        let state = SpaceState::open(
+            dir,
+            id,
+            self.inner.actor.clone(),
+            self.inner.device_secret,
+            None,
+        )
+        .await?;
         self.inner.registry.insert(state);
         self.inner.changed.notify_waiters();
         Ok(id)
@@ -262,7 +283,14 @@ impl Mesh {
         std::fs::create_dir_all(&dir)?;
         keys::write_key(&dir.join("group.key"), &group_key)?;
         let _ = space::write_name(&dir, name);
-        let state = SpaceState::open(dir, id, self.inner.actor.clone(), None).await?;
+        let state = SpaceState::open(
+            dir,
+            id,
+            self.inner.actor.clone(),
+            self.inner.device_secret,
+            None,
+        )
+        .await?;
         self.inner.registry.insert(state);
         self.inner.changed.notify_waiters();
         Ok(())
@@ -326,6 +354,127 @@ impl Mesh {
     /// or used by [`Mesh::join_space`] on another of your devices). `None` if not joined.
     pub fn group_key_of(&self, id: SpaceId) -> Option<[u8; 32]> {
         self.inner.registry.get(&id).map(|s| s.group_key())
+    }
+
+    // ---- role-enforced Spaces (membership rooted in EndpointId) ----
+
+    /// Create a **role-enforced** Space: like [`Mesh::create_space`] but with a signed
+    /// membership log whose root **Admin** is this device, cryptographically bound to the
+    /// SpaceId. Add devices with [`Mesh::add_member`]; their `Admin`/`Writer`/`Reader`
+    /// roles are then enforced against honest peers (a Reader's writes are rejected).
+    pub async fn create_space_with_roles(&self, name: &str) -> Result<SpaceId> {
+        let nonce_full = keys::generate();
+        let mut nonce = [0u8; 16];
+        nonce.copy_from_slice(&nonce_full[..16]);
+        let id = SpaceId::new(&self.inner.device_pubkey, &nonce);
+        if self.inner.registry.contains(&id) {
+            return Ok(id);
+        }
+        let group_key = keys::generate();
+        let dir = self.space_dir(id);
+        std::fs::create_dir_all(&dir)?;
+        keys::write_key(&dir.join("group.key"), &group_key)?;
+        let _ = space::write_name(&dir, name);
+        // Genesis: this device is the self-signed root Admin, bound to the SpaceId.
+        let secret = iroh::SecretKey::from_bytes(&self.inner.device_secret);
+        membership::Membership::genesis(id, &secret, nonce, dir.join("members.log"))?;
+        let state = SpaceState::open(
+            dir,
+            id,
+            self.inner.actor.clone(),
+            self.inner.device_secret,
+            None,
+        )
+        .await?;
+        self.inner.registry.insert(state);
+        self.inner.changed.notify_waiters();
+        Ok(id)
+    }
+
+    /// Serialize a Space's membership log, to seed another device joining with roles
+    /// (hand it alongside the group key, e.g. during pairing).
+    pub fn space_membership_blob(&self, id: SpaceId) -> Option<Vec<u8>> {
+        self.inner
+            .registry
+            .get(&id)
+            .and_then(|s| s.membership_blob())
+    }
+
+    /// Join a role-enforced Space you've been added to: persist its key + the verified
+    /// membership log (which roots trust in the founder Admin), then register it.
+    pub async fn join_space_with_roles(
+        &self,
+        id: SpaceId,
+        group_key: [u8; 32],
+        membership_blob: &[u8],
+        name: &str,
+    ) -> Result<()> {
+        if self.inner.registry.contains(&id) {
+            return Ok(());
+        }
+        let dir = self.space_dir(id);
+        std::fs::create_dir_all(&dir)?;
+        keys::write_key(&dir.join("group.key"), &group_key)?;
+        let _ = space::write_name(&dir, name);
+        let tmp = dir.join("members.log.tmp");
+        std::fs::write(&tmp, membership_blob)?;
+        std::fs::rename(&tmp, dir.join("members.log"))?;
+        // SpaceState::open replays + verifies the seeded log; a forged/mismatched log
+        // (not bound to this SpaceId) fails here rather than being trusted.
+        let state = SpaceState::open(
+            dir,
+            id,
+            self.inner.actor.clone(),
+            self.inner.device_secret,
+            None,
+        )
+        .await?;
+        self.inner.registry.insert(state);
+        self.inner.changed.notify_waiters();
+        Ok(())
+    }
+
+    /// Add a device (by endpoint-id string) to a role-enforced Space. This device must
+    /// be an Admin of that Space.
+    pub fn add_member(&self, id: SpaceId, endpoint: &str, role: Role) -> Result<()> {
+        let ep = endpoint_bytes(endpoint)?;
+        self.space_state(id)?.membership_op(MemberOp::Add(ep, role))
+    }
+
+    /// Promote/demote a member of a role-enforced Space (Admin only).
+    pub fn set_member_role(&self, id: SpaceId, endpoint: &str, role: Role) -> Result<()> {
+        let ep = endpoint_bytes(endpoint)?;
+        self.space_state(id)?
+            .membership_op(MemberOp::SetRole(ep, role))
+    }
+
+    /// Remove a device from a role-enforced Space (Admin only). Full revocation
+    /// (epoch rekey so the removed device loses access to future data) is M3.
+    pub fn remove_member(&self, id: SpaceId, endpoint: &str) -> Result<()> {
+        let ep = endpoint_bytes(endpoint)?;
+        self.space_state(id)?.membership_op(MemberOp::Remove(ep))
+    }
+
+    /// Current members of a role-enforced Space as `(endpoint-id, role)` (empty for a
+    /// permissive Space).
+    pub fn members(&self, id: SpaceId) -> Vec<(String, Role)> {
+        self.inner
+            .registry
+            .get(&id)
+            .map(|s| s.members())
+            .unwrap_or_default()
+    }
+
+    /// This device's role in a Space (`None` if permissive or not a member).
+    pub fn my_role(&self, id: SpaceId) -> Option<Role> {
+        self.inner.registry.get(&id).and_then(|s| s.my_role())
+    }
+
+    fn space_state(&self, id: SpaceId) -> Result<Arc<SpaceState>> {
+        self.inner
+            .registry
+            .get(&id)
+            .ok_or_else(|| CoreError::Other(anyhow::anyhow!("not a member of that space")))
     }
 
     fn space_dir(&self, id: SpaceId) -> PathBuf {
@@ -634,6 +783,17 @@ pub fn endpoint_addr_from_id(id: &str) -> Result<EndpointAddr> {
     Ok(EndpointAddr::from(id))
 }
 
+/// Parse an endpoint-id string into its 32 raw public-key bytes (for membership ops).
+fn endpoint_bytes(s: &str) -> Result<[u8; 32]> {
+    let id: iroh::EndpointId = s
+        .trim()
+        .parse()
+        .map_err(|e| CoreError::Pairing(format!("invalid device id: {e}")))?;
+    let mut a = [0u8; 32];
+    a.copy_from_slice(id.as_bytes());
+    Ok(a)
+}
+
 /// Parse a content [`Hash`] from its string form (as stored in a file offer).
 pub fn hash_from_str(s: &str) -> Result<Hash> {
     s.trim()
@@ -716,11 +876,20 @@ async fn sync_peer(inner: &Arc<Inner>, space: &Arc<SpaceState>, peer: EndpointAd
         .await
         .map_err(|_| CoreError::Unreachable("connect timed out".into()))?
         .map_err(|e| CoreError::Unreachable(e.to_string()))?;
-    let round = space.sync().clone().initiate_sync(conn);
-    tokio::time::timeout(SYNC_ROUND_TIMEOUT, round)
-        .await
-        .map_err(|_| CoreError::Sync("sync round timed out".into()))?
-        .map_err(|e| CoreError::Sync(e.to_string()))?;
+    // Role-enforced Spaces run the verified protocol (membership gate + per-change
+    // signature verification); permissive Spaces run plain Automerge sync.
+    if space.enforced() {
+        tokio::time::timeout(SYNC_ROUND_TIMEOUT, space.initiate_verified(conn))
+            .await
+            .map_err(|_| CoreError::Sync("sync round timed out".into()))?
+            .map_err(|e| CoreError::Sync(e.to_string()))?;
+    } else {
+        let round = space.sync().clone().initiate_sync(conn);
+        tokio::time::timeout(SYNC_ROUND_TIMEOUT, round)
+            .await
+            .map_err(|_| CoreError::Sync("sync round timed out".into()))?
+            .map_err(|e| CoreError::Sync(e.to_string()))?;
+    }
     space.record_sync(peer_id);
     Ok(())
 }

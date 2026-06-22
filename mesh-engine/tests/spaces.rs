@@ -241,7 +241,9 @@ async fn migrates_flat_layout_into_default_space() {
 
     // First run (Spaces layout) writes + persists a value, then shuts down.
     {
-        let a = Mesh::start(CoreConfig::local_only(dir.path())).await.unwrap();
+        let a = Mesh::start(CoreConfig::local_only(dir.path()))
+            .await
+            .unwrap();
         put_probe(&a.doc(), "legacy-data").await;
         a.save().await.unwrap();
         a.shutdown().await.unwrap();
