@@ -65,7 +65,10 @@
     .btn-ghost:hover{background:var(--surface);text-decoration:none;border-color:#2b425e}
 
     /* ---------- hero ---------- */
-    .hero{text-align:center;padding:64px 0 8px}
+    .hero{text-align:center;padding:48px 0 8px}
+    .hero-logo{height:56px;width:auto;display:block;margin:0 auto 28px;
+      filter:drop-shadow(0 8px 28px rgba(45,212,191,.22))}
+    @media(max-width:640px){.hero-logo{height:46px;margin-bottom:22px}}
     .eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--teal);
       background:rgba(45,212,191,.1);border:1px solid rgba(45,212,191,.25);border-radius:999px;padding:6px 14px;margin-bottom:22px}
     .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--teal);box-shadow:0 0 8px var(--teal)}
@@ -179,6 +182,38 @@
     .foot-inner{display:flex;justify-content:space-between;flex-wrap:wrap;gap:14px;align-items:center}
     footer.site a{color:var(--muted)}
 
+    /* ---------- lightbox ---------- */
+    .window,.jstep .jimg{position:relative}
+    .window img,.jstep .jimg img{cursor:zoom-in}
+    .window::after,.jstep .jimg::after{content:"";position:absolute;top:12px;right:12px;width:34px;height:34px;border-radius:9px;
+      background:rgba(8,14,24,.72) center/18px 18px no-repeat;border:1px solid var(--line);
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232DD4BF' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.2-3.2M11 8.5v5M8.5 11h5'/%3E%3C/svg%3E");
+      opacity:0;transform:scale(.9);transition:opacity .2s ease,transform .2s ease;pointer-events:none;z-index:3}
+    .window:hover::after,.jstep .jimg:hover::after{opacity:1;transform:none}
+    .lb{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;padding:24px;
+      background:rgba(5,8,14,.85);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+      opacity:0;visibility:hidden;transition:opacity .28s ease,visibility .28s ease}
+    .lb.open{opacity:1;visibility:visible}
+    .lb-fig{margin:0;display:flex;flex-direction:column;align-items:center;gap:14px;
+      transform:scale(.93);transition:transform .32s cubic-bezier(.2,.9,.3,1.06)}
+    .lb.open .lb-fig{transform:none}
+    .lb-fig img{max-width:92vw;max-height:80vh;width:auto;height:auto;border-radius:14px;border:1px solid var(--line);
+      box-shadow:0 40px 120px rgba(0,0,0,.7);background:var(--base);display:block}
+    .lb-cap{color:var(--muted);font-size:14px;text-align:center;max-width:74ch;margin:0;padding:0 8px}
+    .lb-btn{position:absolute;background:rgba(18,34,58,.72);border:1px solid var(--line);color:var(--text);
+      width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;
+      transition:background .15s ease,transform .15s ease,border-color .15s ease}
+    .lb-btn:hover{background:var(--surface);border-color:#2b425e}
+    .lb-btn svg{width:20px;height:20px}
+    .lb-close{top:20px;right:20px}.lb-close:hover{transform:scale(1.08)}
+    .lb-prev{left:20px;top:50%;transform:translateY(-50%)}
+    .lb-next{right:20px;top:50%;transform:translateY(-50%)}
+    .lb-prev:hover,.lb-next:hover{transform:translateY(-50%) scale(1.08)}
+    .lb-count{position:absolute;top:24px;left:24px;color:var(--muted);font-size:12.5px;font-family:var(--mono);
+      background:rgba(18,34,58,.6);border:1px solid var(--line);border-radius:999px;padding:5px 12px}
+    @media(max-width:640px){.lb-prev{left:8px}.lb-next{right:8px}.lb-btn{width:40px;height:40px}.lb-close{top:12px;right:12px}.lb-count{top:14px;left:14px}}
+    @media(prefers-reduced-motion:reduce){.lb,.lb-fig{transition:opacity .01s}.lb-fig{transform:none}}
+
     /* ---------- reveal ---------- */
     .reveal{opacity:0;transform:translateY(18px);transition:opacity .6s ease,transform .6s ease}
     .reveal.in{opacity:1;transform:none}
@@ -205,6 +240,7 @@
   <div class="wrap">
     <!-- ============ HERO ============ -->
     <div class="hero">
+      <img class="hero-logo" src="logo-mark.png" alt="Kith" width="453" height="160" />
       <span class="eyebrow"><span class="dot"></span> No account · No cloud · Open source</span>
       <h1>Your circle of devices,<br /><span class="grad">in sync.</span></h1>
       <p class="lead">Kith keeps your memory, tabs, and files the same across all your own devices — directly, device&#8209;to&#8209;device, end&#8209;to&#8209;end encrypted. There's no server that can read your data, because there isn't one.</p>
@@ -425,6 +461,68 @@
       for (const e of entries) if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
     }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
     document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+
+    // lightbox — click any screenshot to view full screen
+    (function () {
+      const imgs = [...document.querySelectorAll('.window img, .jstep .jimg img')];
+      if (!imgs.length) return;
+      const lb = document.createElement('div');
+      lb.className = 'lb';
+      lb.setAttribute('role', 'dialog');
+      lb.setAttribute('aria-modal', 'true');
+      lb.setAttribute('aria-label', 'Image viewer');
+      lb.innerHTML =
+        '<span class="lb-count"></span>' +
+        '<button class="lb-btn lb-close" aria-label="Close (Esc)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>' +
+        '<button class="lb-btn lb-prev" aria-label="Previous image"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6 9 12l6 6"/></svg></button>' +
+        '<button class="lb-btn lb-next" aria-label="Next image"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>' +
+        '<figure class="lb-fig"><img alt="" /><figcaption class="lb-cap"></figcaption></figure>';
+      document.body.appendChild(lb);
+      const lbImg = lb.querySelector('.lb-fig img');
+      const cap = lb.querySelector('.lb-cap');
+      const count = lb.querySelector('.lb-count');
+      const btnPrev = lb.querySelector('.lb-prev');
+      const btnNext = lb.querySelector('.lb-next');
+      const multi = imgs.length > 1;
+      btnPrev.style.display = btnNext.style.display = multi ? '' : 'none';
+      count.style.display = multi ? '' : 'none';
+      let idx = 0, lastFocus = null;
+      const render = () => {
+        const im = imgs[idx];
+        lbImg.src = im.currentSrc || im.src;
+        lbImg.alt = im.alt || '';
+        cap.textContent = im.alt || '';
+        count.textContent = (idx + 1) + ' / ' + imgs.length;
+      };
+      const open = (i) => { idx = i; lastFocus = document.activeElement; render(); lb.classList.add('open'); document.body.style.overflow = 'hidden'; lb.querySelector('.lb-close').focus(); };
+      const close = () => { lb.classList.remove('open'); document.body.style.overflow = ''; if (lastFocus && lastFocus.focus) lastFocus.focus(); };
+      const next = () => { idx = (idx + 1) % imgs.length; render(); };
+      const prev = () => { idx = (idx - 1 + imgs.length) % imgs.length; render(); };
+      imgs.forEach((im, i) => {
+        im.tabIndex = 0;
+        im.setAttribute('role', 'button');
+        im.setAttribute('aria-label', 'View full screen' + (im.alt ? ': ' + im.alt : ''));
+        im.addEventListener('click', () => open(i));
+        im.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(i); } });
+      });
+      lb.querySelector('.lb-close').addEventListener('click', close);
+      btnNext.addEventListener('click', (e) => { e.stopPropagation(); next(); });
+      btnPrev.addEventListener('click', (e) => { e.stopPropagation(); prev(); });
+      lb.addEventListener('click', (e) => { if (e.target === lb) close(); });
+      addEventListener('keydown', (e) => {
+        if (!lb.classList.contains('open')) return;
+        if (e.key === 'Escape') close();
+        else if (e.key === 'ArrowRight' && multi) next();
+        else if (e.key === 'ArrowLeft' && multi) prev();
+      });
+      let sx = 0;
+      lb.addEventListener('touchstart', (e) => { sx = e.touches[0].clientX; }, { passive: true });
+      lb.addEventListener('touchend', (e) => {
+        if (!multi) return;
+        const dx = e.changedTouches[0].clientX - sx;
+        if (dx > 50) prev(); else if (dx < -50) next();
+      }, { passive: true });
+    })();
   </script>
 </body>
 </html>
