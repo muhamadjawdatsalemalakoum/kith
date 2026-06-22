@@ -3435,6 +3435,7 @@ dependencies = [
  "anyhow",
  "automerge",
  "chacha20poly1305",
+ "data-encoding",
  "hmac",
  "iroh",
  "iroh-blobs",

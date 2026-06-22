@@ -1,11 +1,11 @@
-//! Device pairing over the wire: a new device joins the group from a short code.
+//! Device pairing over the wire: a new device joins a specific Space from a short code.
 //!
 //! Both sides run symmetric SPAKE2 ([`crate::pairing`]) from the same human code to
-//! derive an ephemeral key, confirm it with the HMAC tag (constant-time, mutual),
-//! then the host sends the GROUP KEY encrypted under that ephemeral key. A wrong code
-//! yields different keys → the confirm step fails → no key is handed out. SPAKE2 gives
-//! an attacker only one online guess per attempt, and the host only answers while
-//! explicitly armed (one-shot).
+//! derive an ephemeral key, confirm it with the HMAC tag (constant-time, mutual), then
+//! the host sends `SpaceId || group key` encrypted under that ephemeral key. A wrong
+//! code yields different keys → the confirm step fails → nothing is handed out. SPAKE2
+//! gives an attacker only one online guess per attempt, and the host only answers while
+//! explicitly armed (one-shot) for a chosen Space.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,38 +15,46 @@ use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use subtle::ConstantTimeEq;
 
+use crate::space::{SpaceId, SpaceRegistry};
 use crate::{atrest, pairing};
 
 /// ALPN for the pairing protocol.
 pub const PAIR_ALPN: &[u8] = b"kith/pair/1";
 
 const MAX_FRAME: usize = 64 * 1024;
+/// `SpaceId(32) || group_key(32)`, the payload handed to a joiner.
+const HANDOFF_LEN: usize = 64;
 
-/// Host side: answers a pairing attempt while armed, handing out the group key.
+/// What the host is currently offering: a short code and which Space it joins.
 #[derive(Clone)]
-pub struct PairingHandler {
-    /// The currently-armed short code, or `None` when not in pairing mode.
-    pub armed: Arc<Mutex<Option<Vec<u8>>>>,
-    /// The group key this device hands out on a successful pairing.
-    pub group_key: [u8; 32],
-    /// Set to the joiner's endpoint id after a successful pairing (for the app to
-    /// show + persist; the engine has already peered with it).
+pub struct ArmedPairing {
+    pub code: Vec<u8>,
+    pub space_id: SpaceId,
+}
+
+/// Host side: answers a pairing attempt while armed, handing out a Space's id + group
+/// key. One global armed slot (the human arms one Space at a time).
+#[derive(Clone)]
+pub struct PairingDispatcher {
+    /// The currently-armed pairing, or `None` when not in pairing mode.
+    pub armed: Arc<Mutex<Option<ArmedPairing>>>,
+    /// All Spaces this device runs — the armed Space's group key is looked up here.
+    pub registry: Arc<SpaceRegistry>,
+    /// Set to the joiner's endpoint id after a successful pairing (for the app to show
+    /// + persist; the engine has already peered with it in the armed Space).
     pub joined: Arc<Mutex<Option<String>>>,
-    /// Shared peer set — a successful pairing peers the host back with the joiner so
-    /// both sides converge (not just the joiner dialing the host).
-    pub peers: Arc<tokio::sync::Mutex<Vec<iroh::EndpointAddr>>>,
     /// Wakes the sync loop when the new peer is added.
     pub changed: Arc<tokio::sync::Notify>,
 }
 
 // Redacted Debug (iroh's ProtocolHandler requires Debug) — never log key material.
-impl std::fmt::Debug for PairingHandler {
+impl std::fmt::Debug for PairingDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("PairingHandler { .. }")
+        f.write_str("PairingDispatcher { .. }")
     }
 }
 
-impl ProtocolHandler for PairingHandler {
+impl ProtocolHandler for PairingDispatcher {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
         self.run(conn)
             .await
@@ -54,15 +62,18 @@ impl ProtocolHandler for PairingHandler {
     }
 }
 
-impl PairingHandler {
+impl PairingDispatcher {
     async fn run(&self, conn: Connection) -> Result<()> {
-        let code = self.armed.lock().expect("armed lock").clone();
-        let Some(code) = code else {
+        let armed = self.armed.lock().expect("armed lock").clone();
+        let Some(armed) = armed else {
             anyhow::bail!("not in pairing mode");
+        };
+        let Some(space) = self.registry.get(&armed.space_id) else {
+            anyhow::bail!("armed Space no longer exists");
         };
 
         let (mut send, mut recv) = conn.accept_bi().await?;
-        let p = pairing::start(&code);
+        let p = pairing::start(&armed.code);
         let their_msg = read_frame(&mut recv).await?;
         write_frame(&mut send, &p.outbound).await?;
         let key = pairing::finish(p, &their_msg).map_err(|_| anyhow::anyhow!("pairing finish"))?;
@@ -75,13 +86,17 @@ impl PairingHandler {
             anyhow::bail!("pairing code mismatch");
         }
 
-        // Hand over the group key, encrypted under the confirmed ephemeral key.
-        let blob = atrest::encrypt(&key, &self.group_key);
+        // Hand over `SpaceId || group key`, encrypted under the confirmed ephemeral key,
+        // so the joiner adopts THIS Space (not just a bare key).
+        let mut payload = Vec::with_capacity(HANDOFF_LEN);
+        payload.extend_from_slice(armed.space_id.as_bytes());
+        payload.extend_from_slice(&space.group_key());
+        let blob = atrest::encrypt(&key, &payload);
         write_frame(&mut send, &blob).await?;
 
-        // Learn the joiner's endpoint id (best-effort, time-boxed) and peer back with
-        // it. Without this only the joiner would dial the host, so a headless host or
-        // one whose joiner is offline would never converge — the core sync promise.
+        // Learn the joiner's endpoint id (best-effort, time-boxed) and peer back with it
+        // in the armed Space. Without this only the joiner would dial the host, so a
+        // headless host — or one whose joiner is offline — would never converge.
         if let Ok(Ok(frame)) =
             tokio::time::timeout(Duration::from_secs(10), read_frame(&mut recv)).await
         {
@@ -90,9 +105,7 @@ impl PairingHandler {
                 if !id.is_empty() {
                     *self.joined.lock().expect("joined lock") = Some(id.clone());
                     if let Ok(addr) = crate::endpoint_addr_from_id(&id) {
-                        let mut peers = self.peers.lock().await;
-                        if !peers.iter().any(|p| p.id == addr.id) {
-                            peers.push(addr);
+                        if space.add_peer(addr).await {
                             self.changed.notify_waiters();
                         }
                     }
@@ -109,13 +122,13 @@ impl PairingHandler {
     }
 }
 
-/// Joiner side: connect to `host`, run pairing from `code`, return the group key to
-/// adopt. The caller persists it (and restarts) to join the group.
+/// Joiner side: connect to `host`, run pairing from `code`, return the `(SpaceId, group
+/// key)` to adopt. The caller persists it (and restarts) to join that Space.
 pub async fn join(
     endpoint: &iroh::Endpoint,
     host: iroh::EndpointAddr,
     code: &[u8],
-) -> Result<[u8; 32]> {
+) -> Result<(SpaceId, [u8; 32])> {
     let conn = endpoint
         .connect(host, PAIR_ALPN)
         .await
@@ -135,19 +148,23 @@ pub async fn join(
     write_frame(&mut send, &our_tag).await?;
 
     let blob = read_frame(&mut recv).await?;
-    let gk = atrest::decrypt(&key, &blob)
-        .ok_or_else(|| anyhow::anyhow!("could not decrypt group key"))?;
-    if gk.len() != 32 {
-        anyhow::bail!("bad group key length");
+    let payload = atrest::decrypt(&key, &blob)
+        .ok_or_else(|| anyhow::anyhow!("could not decrypt Space handoff"))?;
+    if payload.len() != HANDOFF_LEN {
+        anyhow::bail!("bad Space handoff length");
     }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&gk);
+    let mut id_bytes = [0u8; 32];
+    id_bytes.copy_from_slice(&payload[..32]);
+    let mut gk = [0u8; 32];
+    gk.copy_from_slice(&payload[32..]);
+    let space_id = SpaceId::from_bytes(id_bytes);
+
     // Tell the host our endpoint id so it can peer back with us, then let it close.
     let my_id = endpoint.id().to_string();
     let _ = write_frame(&mut send, my_id.as_bytes()).await;
     let _ = send.finish();
     conn.closed().await;
-    Ok(out)
+    Ok((space_id, gk))
 }
 
 async fn write_frame(send: &mut SendStream, data: &[u8]) -> Result<()> {

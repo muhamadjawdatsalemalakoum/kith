@@ -8,6 +8,7 @@
 //! 0.103), trimmed to a single raw blob (no Collection) for the minimal primitive.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -17,55 +18,68 @@ use iroh_blobs::api::blobs::{AddPathOptions, ExportMode, ExportOptions, ImportMo
 use iroh_blobs::api::remote::GetProgressItem;
 use iroh_blobs::api::TempTag;
 use iroh_blobs::store::fs::FsStore;
-use iroh_blobs::{BlobFormat, BlobsProtocol, Hash, HashAndFormat};
+use iroh_blobs::{BlobFormat, Hash, HashAndFormat};
+
 use n0_future::StreamExt;
 
 use crate::error::{CoreError, Result};
+use crate::space::{SpaceId, SpaceRegistry};
 
-/// Wraps the stock blobs provider with a group-key gate: a peer must prove possession
-/// of the shared group key ([`crate::auth`]) on the first stream before ANY blob bytes
-/// are served. Without this the blobs ALPN would hand any hash to any caller — the
-/// content hash would be the only capability. Mirrors the sync layer's auth gate.
-pub struct GatedBlobs {
-    inner: BlobsProtocol,
-    group_key: [u8; 32],
+/// SpaceId bytes that prefix the blob auth stream (mirrors the sync dispatcher).
+const SPACE_ID_LEN: usize = 32;
+
+/// The single blobs-ALPN accept handler. Like [`crate::sync::SyncDispatcher`], it reads
+/// the SpaceId off the first (auth) stream, looks up the Space, runs THAT Space's
+/// group-key gate, then hands the connection to that Space's stock blobs provider — so
+/// a member of Space A can never fetch Space B's content, and a non-member is refused
+/// before any byte is served. Without the gate the blobs ALPN would hand any hash to
+/// any caller (the content hash would be the only capability).
+#[derive(Clone)]
+pub struct BlobDispatcher {
+    registry: Arc<SpaceRegistry>,
 }
 
-impl GatedBlobs {
-    pub fn new(store: &FsStore, group_key: [u8; 32]) -> Self {
-        Self {
-            inner: BlobsProtocol::new(store, None),
-            group_key,
-        }
+impl BlobDispatcher {
+    pub fn new(registry: Arc<SpaceRegistry>) -> Self {
+        Self { registry }
     }
 }
 
 // Redacted Debug (ProtocolHandler requires Debug) — never log key material.
-impl std::fmt::Debug for GatedBlobs {
+impl std::fmt::Debug for BlobDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("GatedBlobs { .. }")
+        f.write_str("BlobDispatcher { .. }")
     }
 }
 
-impl ProtocolHandler for GatedBlobs {
+impl ProtocolHandler for BlobDispatcher {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
-        // The first bi-stream is the group-key handshake; reject non-members before
-        // the stock provider ever sees the connection.
-        let (mut send, mut recv) = conn
-            .accept_bi()
+        use crate::sync::acc_err;
+        // The first bi-stream is `SpaceId || group-key handshake`; reject a non-member
+        // (or an unknown Space) before the stock provider ever sees the connection.
+        let (mut send, mut recv) = conn.accept_bi().await.map_err(acc_err)?;
+        let mut id = [0u8; SPACE_ID_LEN];
+        crate::auth::read_exact_timed(&mut recv, &mut id)
             .await
-            .map_err(|e| AcceptError::from_err(std::io::Error::other(e.to_string())))?;
-        crate::auth::responder(&self.group_key, &mut send, &mut recv)
+            .map_err(acc_err)?;
+        let space_id = SpaceId::from_bytes(id);
+        let Some(space) = self.registry.get(&space_id) else {
+            return Err(acc_err("unknown space"));
+        };
+        let group_key = space.group_key();
+        crate::auth::responder(&group_key, &mut send, &mut recv)
             .await
-            .map_err(|e| AcceptError::from_err(std::io::Error::other(e.to_string())))?;
+            .map_err(acc_err)?;
         let _ = send.finish();
-        // Authenticated: hand the rest of the connection to the stock blobs provider,
-        // which loops accepting the subsequent request stream(s).
-        self.inner.accept(conn).await
+        // Authenticated for this Space: hand the rest of the connection to that Space's
+        // stock blobs provider, which loops accepting the subsequent request stream(s).
+        space.blobs_accept(conn).await
     }
 
     async fn shutdown(&self) {
-        self.inner.shutdown().await;
+        for space in self.registry.all() {
+            space.blobs_shutdown().await;
+        }
     }
 }
 
@@ -100,28 +114,18 @@ pub async fn add_file(store: &FsStore, path: &Path) -> Result<TempTag> {
     Ok(tt)
 }
 
-/// Download the raw blob named by `hash` over `conn` (resuming from any partial
-/// data already local), then export it to `dest`. BLAKE3-verified end to end.
-pub async fn fetch_to(
-    store: &FsStore,
-    conn: Connection,
-    hash: Hash,
-    dest: &Path,
-    group_key: &[u8; 32],
-) -> Result<()> {
-    fetch_to_with_progress(store, conn, hash, dest, group_key, |_, _| {}).await
-}
-
-/// Like [`fetch_to`], but calls `on_progress(bytes_downloaded, relayed)` as data
-/// arrives — the live byte count plus whether the current path is via the relay
-/// (for a direct-vs-relayed badge). The total size is known by the caller (it rides
-/// in the file offer), so it isn't reported here.
+/// Download the raw blob named by `hash` over `conn` (resuming from any partial data
+/// already local), then export it to `dest`. BLAKE3-verified end to end. Calls
+/// `on_progress(bytes_downloaded, relayed)` as data arrives — the live byte count plus
+/// whether the current path is via the relay (for a direct-vs-relayed badge). The total
+/// size is known by the caller (it rides in the file offer), so it isn't reported here.
 pub async fn fetch_to_with_progress(
     store: &FsStore,
     conn: Connection,
     hash: Hash,
     dest: &Path,
     group_key: &[u8; 32],
+    space_id: &SpaceId,
     mut on_progress: impl FnMut(u64, bool),
 ) -> Result<()> {
     let hf = HashAndFormat::raw(hash);
@@ -133,10 +137,15 @@ pub async fn fetch_to_with_progress(
         .await
         .context("inspect local store")?;
     if !local.is_complete() {
-        // Prove we hold the group key before requesting any bytes (the provider gates
-        // on this; an unauthenticated peer is served nothing).
+        // Name the Space, then prove we hold its group key, before requesting any bytes
+        // (the dispatcher routes on the SpaceId and gates on the key; an unauthenticated
+        // peer — or one naming the wrong Space — is served nothing).
         {
             let (mut a_send, mut a_recv) = conn.open_bi().await.context("open blob auth stream")?;
+            a_send
+                .write_all(space_id.as_bytes())
+                .await
+                .context("send space id")?;
             crate::auth::initiator(group_key, &mut a_send, &mut a_recv)
                 .await
                 .context("blob group authentication")?;

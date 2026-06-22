@@ -1,23 +1,26 @@
 //! # mesh-engine — the serverless P2P substrate
 //!
-//! The shared engine the whole family runs on: a flat peer-to-peer mesh where
-//! every device is an equal peer holding a full, end-to-end-encrypted replica of
-//! a small mutable [Automerge] document, synced directly between a user's own
-//! devices over [iroh] QUIC (mainline-DHT discovery, relays only as fallback).
-//! There is no hub and no account.
+//! The shared engine the whole family runs on: a flat peer-to-peer mesh where every
+//! device is an equal peer holding a full, end-to-end-encrypted replica of a small
+//! mutable [Automerge] document, synced directly between a user's own devices over
+//! [iroh] QUIC (mainline-DHT discovery, relays only as fallback). There is no hub and
+//! no account.
+//!
+//! ## Spaces
+//! A device runs **N independent encrypted Spaces** concurrently ([`SpaceId`]). Each
+//! Space is its own private network — its own group key, at-rest key, replica, blob
+//! store, peers, and data subdir — but they all share the one [iroh] endpoint and the
+//! one device identity. Edits in Space A converge only to A's members and never leak
+//! into B. Every device has a **default Space** (a well-known constant id) so the
+//! single-group behaviour the engine had before Spaces still holds; the public methods
+//! on [`Mesh`] (e.g. [`Mesh::doc`], [`Mesh::add_peer`]) operate on the **active Space**
+//! (the default until changed), while [`Mesh::space`] / [`Mesh::create_space`] /
+//! [`Mesh::list_spaces`] address Spaces explicitly.
 //!
 //! Apps are thin: centralTabs (tabs), agent-memory, Dropwire-on-mesh, an MCP app —
-//! each brings its own data model + UX and runs on this one substrate, the way
-//! iroh-blobs/-docs/-gossip run on iroh. This crate is the *only* place that
-//! depends on `iroh` / `automerge`; apps speak its types — and the re-exported
-//! [`automerge`] — so the whole family shares exactly one CRDT version.
-//!
-//! ## What the engine does for you
-//! - **State primitive** (this doc): a CRDT replica that auto-syncs across the
-//!   peers you add, conflict-free and offline-tolerant, persisted to disk.
-//! - **Blob primitive**: content-addressed file transfer ([`Mesh::share_file`] /
-//!   [`Mesh::fetch_file`]).
-//! - **Account-free pairing**: [`pairing`] (SPAKE2 group key from a short code).
+//! each brings its own data model + UX and runs on this one substrate. This crate is
+//! the *only* place that depends on `iroh` / `automerge`; apps speak its types — and
+//! the re-exported [`automerge`] — so the whole family shares exactly one CRDT version.
 //!
 //! [Automerge]: https://automerge.org
 //! [iroh]: https://iroh.computer
@@ -33,20 +36,23 @@ mod identity;
 mod keys;
 mod pair;
 pub mod pairing;
+mod space;
 mod sync;
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use automerge::ActorId;
 use iroh::protocol::Router;
-use iroh_blobs::api::TempTag;
-use tokio::sync::{mpsc, Mutex, Notify};
+use iroh::EndpointId;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 // The engine's public vocabulary. Apps build their data models on the re-exported
-// `automerge` (one CRDT version family-wide), move files via the blob primitive
-// keyed by `Hash`, and address peers with `EndpointAddr`.
+// `automerge` (one CRDT version family-wide), move files via the blob primitive keyed
+// by `Hash`, and address peers with `EndpointAddr`.
 pub use automerge;
 pub use automerge::Automerge;
 pub use iroh::EndpointAddr;
@@ -55,7 +61,11 @@ pub use iroh_blobs::Hash;
 pub use config::{CoreConfig, Infra};
 pub use doc::SharedDoc;
 pub use error::{CoreError, Result};
+pub use space::{SpaceId, SpaceInfo};
 pub use sync::MeshSync;
+
+use pair::ArmedPairing;
+use space::{SpaceRegistry, SpaceState};
 
 /// ALPN for the engine's mesh sync protocol.
 pub const MESH_ALPN: &[u8] = b"mesh-engine/sync/1";
@@ -68,37 +78,29 @@ const SYNC_INTERVAL: Duration = Duration::from_millis(1500);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bound on a single sync round once connected.
 const SYNC_ROUND_TIMEOUT: Duration = Duration::from_secs(30);
-/// Monotonic counter for unique save temp-file names (avoids concurrent-save clobber).
-static SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Shared engine state, held behind an `Arc` so the background sync loop and the
-/// public handle share one set of peers, one replica, and one router.
+/// Shared engine state, held behind an `Arc` so the background sync loop, the accept
+/// dispatchers, and the public handle share one registry of Spaces and one router.
 struct Inner {
     router: Router,
-    sync: Arc<MeshSync>,
-    doc: SharedDoc,
-    blobs_store: iroh_blobs::store::fs::FsStore,
-    /// Temp tags for files we serve, held so their blobs aren't garbage-collected.
-    kept_tags: Mutex<Vec<TempTag>>,
-    /// Peers we keep converged with (their reachable addresses). Shared with the
-    /// pairing handler so a successful pairing peers both sides automatically.
-    peers: Arc<Mutex<Vec<EndpointAddr>>>,
-    /// Pinged on a local change or a new peer to wake the sync loop immediately.
+    /// Every Space this device runs, looked up by id on inbound connections and by the
+    /// public API. Shared with the sync/blob/pairing dispatchers.
+    registry: Arc<SpaceRegistry>,
+    /// Root application data directory (`node.key` + `spaces/<id>/…`).
+    data_dir: PathBuf,
+    /// The global device CRDT actor (one identity per device across all Spaces).
+    actor: ActorId,
+    /// This device's public key bytes — the founding key for [`SpaceId::new`].
+    device_pubkey: [u8; 32],
+    /// The Space the bare [`Mesh`] methods operate on (default until changed).
+    active: StdMutex<SpaceId>,
+    /// Pinged on a local change, a new peer, or a new Space to wake the sync loop.
     changed: Arc<Notify>,
-    /// Where the compacted replica snapshot is persisted (encrypted at rest).
-    doc_path: PathBuf,
-    /// Per-device key encrypting the snapshot on disk.
-    atrest_key: [u8; 32],
-    /// Shared group secret that gates who may sync (held for pairing handoff).
-    group_key: [u8; 32],
-    /// The currently-armed pairing code (Some while in "add a device" mode).
-    pair_armed: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
-    /// Set to the endpoint id of a device that just paired in (host side), so the
-    /// app can show + persist it. Drained by [`Mesh::take_joined`].
-    pair_joined: Arc<std::sync::Mutex<Option<String>>>,
-    /// When each peer last completed a successful sync round — powers the UI's
-    /// per-device "synced N ago" / live status.
-    last_sync: std::sync::Mutex<std::collections::HashMap<iroh::EndpointId, std::time::SystemTime>>,
+    /// The currently-armed pairing (Some while in "add a device" mode), naming a Space.
+    pair_armed: Arc<StdMutex<Option<ArmedPairing>>>,
+    /// Set to the endpoint id of a device that just paired in (host side). Drained by
+    /// [`Mesh::take_joined`].
+    pair_joined: Arc<StdMutex<Option<String>>>,
     /// Stops the background loop on shutdown.
     cancel: CancellationToken,
 }
@@ -110,75 +112,93 @@ pub struct Mesh {
 }
 
 impl Mesh {
-    /// Start a peer: load/derive identity, restore-or-open the replica, bind the
-    /// endpoint, spin up the always-on sync router, and start the background loop
-    /// that keeps known peers converged and persists the replica.
+    /// Start a peer: load/derive identity, restore every Space's replica, bind the one
+    /// endpoint, spin up the always-on sync router (whose accept handlers route by
+    /// [`SpaceId`]), and start the background loop that keeps known peers converged and
+    /// persists each Space.
     pub async fn start(config: CoreConfig) -> Result<Mesh> {
         std::fs::create_dir_all(&config.data_dir)?;
 
         let secret = identity::load_or_create(&config.data_dir.join("node.key"))?;
         let actor = identity::actor_id(&secret);
-        // Per-device key that encrypts the replica snapshot at rest.
-        let atrest_key = keys::load_or_create(&config.data_dir.join("atrest.key"))?;
-
-        // Restore the replica (decrypting at rest); on a corrupt/torn/empty or
-        // undecryptable snapshot, recover by booting fresh (re-converges from peers)
-        // instead of bricking the app.
-        let doc_path = config.data_dir.join("doc.automerge");
-        let doc = load_or_recover(&doc_path, actor, &atrest_key);
-
-        // The group key gates who may sync — provided explicitly (pairing / tests) or
-        // loaded/generated in the data dir.
-        let group_key = match config.group_key {
-            Some(k) => k,
-            None => keys::load_or_create(&config.data_dir.join("group.key"))?,
+        let device_pubkey = {
+            let pk = secret.public();
+            let mut a = [0u8; 32];
+            a.copy_from_slice(pk.as_bytes());
+            a
         };
 
-        let (merged_tx, _merged_rx) = mpsc::channel::<Automerge>(16);
-        let sync = MeshSync::with_shared(doc.clone(), group_key, merged_tx);
+        // Spaces live under `data_dir/spaces/<id>/`. Migrate any pre-Spaces flat layout
+        // (a single-group install) into the default Space the first time.
+        let spaces_root = config.data_dir.join("spaces");
+        migrate_flat_layout(&config.data_dir, &spaces_root)?;
+        std::fs::create_dir_all(&spaces_root)?;
 
-        let blobs_store = blobs::open(&config.data_dir.join("blobs")).await?;
+        let registry = SpaceRegistry::new();
+        let default_id = SpaceId::default_space();
+        let default_dir = spaces_root.join(default_id.to_hex());
+        // The default Space adopts the config's explicit key (tests / a just-paired key
+        // on restart) or loads/generates its own. Other Spaces load from disk.
+        let default_space =
+            SpaceState::open(default_dir, default_id, actor.clone(), config.group_key).await?;
+        registry.insert(default_space);
+
+        if let Ok(rd) = std::fs::read_dir(&spaces_root) {
+            for entry in rd.flatten() {
+                if !entry.path().is_dir() {
+                    continue;
+                }
+                let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                let Some(id) = SpaceId::parse(&name) else {
+                    continue;
+                };
+                if id == default_id {
+                    continue;
+                }
+                let state = SpaceState::open(entry.path(), id, actor.clone(), None).await?;
+                registry.insert(state);
+            }
+        }
+        let registry = Arc::new(registry);
+
         let endpoint = endpoint::build(secret, &config.infra, config.enable_blobs).await?;
-        let pair_armed = Arc::new(std::sync::Mutex::new(None));
-        let pair_joined = Arc::new(std::sync::Mutex::new(None));
-        // Shared with the pairing handler so a completed pairing peers both sides.
-        let peers: Arc<Mutex<Vec<EndpointAddr>>> = Arc::new(Mutex::new(Vec::new()));
+        let pair_armed = Arc::new(StdMutex::new(None));
+        let pair_joined = Arc::new(StdMutex::new(None));
         let changed = Arc::new(Notify::new());
-        // Mesh sync + pairing always; blobs only when explicitly enabled.
+
+        // One router; its accept handlers dispatch by SpaceId. Mesh sync + pairing
+        // always; blobs only when explicitly enabled.
         let mut builder = Router::builder(endpoint)
-            .accept(MESH_ALPN, sync.clone())
+            .accept(MESH_ALPN, sync::SyncDispatcher::new(registry.clone()))
             .accept(
                 pair::PAIR_ALPN,
-                pair::PairingHandler {
+                pair::PairingDispatcher {
                     armed: pair_armed.clone(),
-                    group_key,
+                    registry: registry.clone(),
                     joined: pair_joined.clone(),
-                    peers: peers.clone(),
                     changed: changed.clone(),
                 },
             );
         if config.enable_blobs {
             builder = builder.accept(
                 iroh_blobs::ALPN,
-                blobs::GatedBlobs::new(&blobs_store, group_key),
+                blobs::BlobDispatcher::new(registry.clone()),
             );
         }
         let router = builder.spawn();
 
         let inner = Arc::new(Inner {
             router,
-            sync,
-            doc,
-            blobs_store,
-            kept_tags: Mutex::new(Vec::new()),
-            peers,
+            registry,
+            data_dir: config.data_dir.clone(),
+            actor,
+            device_pubkey,
+            active: StdMutex::new(default_id),
             changed,
-            doc_path,
-            atrest_key,
-            group_key,
             pair_armed,
             pair_joined,
-            last_sync: std::sync::Mutex::new(std::collections::HashMap::new()),
             cancel: CancellationToken::new(),
         });
 
@@ -186,94 +206,11 @@ impl Mesh {
         Ok(Mesh { inner })
     }
 
+    // ---- device-global handles (one endpoint / identity across all Spaces) ----
+
     /// This device's stable public identity (`EndpointId`), as a string.
     pub fn endpoint_id(&self) -> String {
         self.inner.router.endpoint().id().to_string()
-    }
-
-    /// This device's group key — the shared secret that gates who may sync. Hand it to
-    /// a new device during pairing so it can join the group.
-    pub fn group_key(&self) -> [u8; 32] {
-        self.inner.group_key
-    }
-
-    /// Enter "add a device" mode: answer ONE pairing attempt presenting `code` (a
-    /// short human code shown on this device), then disarm. Run this on the device the
-    /// user is joining FROM.
-    pub fn arm_pairing(&self, code: &[u8]) {
-        *self.inner.pair_joined.lock().expect("joined lock") = None;
-        *self.inner.pair_armed.lock().expect("armed lock") = Some(code.to_vec());
-    }
-
-    /// Leave "add a device" mode without completing a pairing (e.g. the user
-    /// cancelled). Safe to call when not armed.
-    pub fn disarm_pairing(&self) {
-        *self.inner.pair_armed.lock().expect("armed lock") = None;
-    }
-
-    /// Take the endpoint id of a device that just paired in (host side), clearing it.
-    /// Returns `None` until a device completes pairing against an armed code. The
-    /// engine has already added it as a sync peer; this is for the app to show + persist.
-    pub fn take_joined(&self) -> Option<String> {
-        self.inner.pair_joined.lock().expect("joined lock").take()
-    }
-
-    /// For each peer that has ever completed a sync, the seconds since that last
-    /// successful round (keyed by endpoint-id string). Powers per-device sync status.
-    pub fn last_sync_ages(&self) -> std::collections::HashMap<String, u64> {
-        let now = std::time::SystemTime::now();
-        self.inner
-            .last_sync
-            .lock()
-            .map(|m| {
-                m.iter()
-                    .map(|(id, t)| {
-                        (
-                            id.to_string(),
-                            now.duration_since(*t).map(|d| d.as_secs()).unwrap_or(0),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Join the group hosted by `host` using the shared short `code`: run the SPAKE2
-    /// pairing handshake, receive the group key, and persist it. **Restart this peer**
-    /// afterwards to adopt the group and begin syncing. (Requires a file-based group
-    /// key — i.e. `CoreConfig.group_key == None`.)
-    pub async fn pair_with(&self, host: EndpointAddr, code: &[u8]) -> Result<()> {
-        let gk = pair::join(self.inner.router.endpoint(), host, code)
-            .await
-            .map_err(|e| CoreError::Pairing(e.to_string()))?;
-        let dir = self
-            .inner
-            .doc_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."));
-        let group_path = dir.join("group.key");
-        let tmp = group_path.with_extension("key.tmp");
-        std::fs::write(&tmp, gk)?;
-        std::fs::rename(&tmp, &group_path)?;
-        Ok(())
-    }
-
-    /// Revoke access by rotating to a NEW group key (persisted for next start). The
-    /// evicted device's old key stops authenticating. **Restart this device, then
-    /// re-pair the devices you keep** with the new key. (Manual revocation; automatic
-    /// epoch rotation across the group is a future enhancement.)
-    pub fn rotate_group_key(&self) -> Result<[u8; 32]> {
-        let new = iroh::SecretKey::generate().to_bytes();
-        let dir = self
-            .inner
-            .doc_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."));
-        let group_path = dir.join("group.key");
-        let tmp = group_path.with_extension("key.tmp");
-        std::fs::write(&tmp, new)?;
-        std::fs::rename(&tmp, &group_path)?;
-        Ok(new)
     }
 
     /// This device's connectable address (id + direct/relay transports).
@@ -281,9 +218,8 @@ impl Mesh {
         self.inner.router.endpoint().addr()
     }
 
-    /// Wait (time-boxed) for the relay handshake so [`Mesh::endpoint_addr`] includes
-    /// a relay-reachable address. Needed before sharing an address in relay-backed
-    /// modes; a near-instant no-op on direct/local-only links.
+    /// Wait (time-boxed) for the relay handshake so [`Mesh::endpoint_addr`] includes a
+    /// relay-reachable address. A near-instant no-op on direct/local-only links.
     pub async fn online(&self) {
         let _ = tokio::time::timeout(
             Duration::from_secs(10),
@@ -292,99 +228,253 @@ impl Mesh {
         .await;
     }
 
-    /// Add a peer to keep converged with. The background loop will sync with it
-    /// continuously (and immediately). Idempotent: adding a peer already known (same
-    /// endpoint id) is a no-op, so it never spawns duplicate sync tasks.
-    pub async fn add_peer(&self, peer: EndpointAddr) {
-        {
-            let mut peers = self.inner.peers.lock().await;
-            if peers.iter().any(|p| p.id == peer.id) {
-                return;
-            }
-            peers.push(peer);
+    // ---- Space management ----
+
+    /// Create a brand-new, empty Space with a random public id and a fresh random group
+    /// key. It is registered live and persisted under `data_dir/spaces/<id>/`. Returns
+    /// the new [`SpaceId`]; pair another device into it (or [`Mesh::join_space`]) to add
+    /// members.
+    pub async fn create_space(&self, name: &str) -> Result<SpaceId> {
+        let nonce = keys::generate();
+        let id = SpaceId::new(&self.inner.device_pubkey, &nonce[..16]);
+        if self.inner.registry.contains(&id) {
+            return Ok(id);
         }
+        let group_key = keys::generate();
+        let dir = self.space_dir(id);
+        std::fs::create_dir_all(&dir)?;
+        keys::write_key(&dir.join("group.key"), &group_key)?;
+        let _ = space::write_name(&dir, name);
+        let state = SpaceState::open(dir, id, self.inner.actor.clone(), None).await?;
+        self.inner.registry.insert(state);
         self.inner.changed.notify_waiters();
+        Ok(id)
     }
 
-    /// Stop keeping a peer converged: drop it from the peer set so the background loop
-    /// cancels its sync task on the next tick. Returns whether it was present.
+    /// Join an existing Space whose `(id, group_key)` you already hold (from pairing, an
+    /// export, or [`Mesh::create_space`] + [`Mesh::group_key_of`] on another device).
+    /// Registers it live and persists it. Idempotent if already joined.
+    pub async fn join_space(&self, id: SpaceId, group_key: [u8; 32], name: &str) -> Result<()> {
+        if self.inner.registry.contains(&id) {
+            return Ok(());
+        }
+        let dir = self.space_dir(id);
+        std::fs::create_dir_all(&dir)?;
+        keys::write_key(&dir.join("group.key"), &group_key)?;
+        let _ = space::write_name(&dir, name);
+        let state = SpaceState::open(dir, id, self.inner.actor.clone(), None).await?;
+        self.inner.registry.insert(state);
+        self.inner.changed.notify_waiters();
+        Ok(())
+    }
+
+    /// Leave a Space: stop syncing it, close its store, and delete its local data. The
+    /// default Space cannot be left (it is the always-present base). Returns whether the
+    /// Space was present.
+    pub async fn leave_space(&self, id: SpaceId) -> Result<bool> {
+        if id.is_default() {
+            return Err(CoreError::Other(anyhow::anyhow!(
+                "the default space cannot be left"
+            )));
+        }
+        let Some(state) = self.inner.registry.remove(&id) else {
+            return Ok(false);
+        };
+        {
+            let mut a = self.inner.active.lock().expect("active lock");
+            if *a == id {
+                *a = SpaceId::default_space();
+            }
+        }
+        state.shutdown().await;
+        let _ = std::fs::remove_dir_all(self.space_dir(id));
+        // Wake the loop so it drops this Space's per-peer sync tasks.
+        self.inner.changed.notify_waiters();
+        Ok(true)
+    }
+
+    /// Every Space this device runs (default first).
+    pub fn list_spaces(&self) -> Vec<SpaceInfo> {
+        self.inner.registry.infos()
+    }
+
+    /// The Space the bare [`Mesh`] methods currently operate on.
+    pub fn active_space(&self) -> SpaceId {
+        *self.inner.active.lock().expect("active lock")
+    }
+
+    /// Point the bare [`Mesh`] methods at a different Space. Returns whether the Space
+    /// exists (no-op if it doesn't).
+    pub fn set_active_space(&self, id: SpaceId) -> bool {
+        if !self.inner.registry.contains(&id) {
+            return false;
+        }
+        *self.inner.active.lock().expect("active lock") = id;
+        true
+    }
+
+    /// A scoped handle to one Space, for code that addresses a Space explicitly (the
+    /// GUI's Space picker, an MCP server bound to one Space). `None` if not joined.
+    pub fn space(&self, id: SpaceId) -> Option<SpaceHandle> {
+        self.inner.registry.get(&id).map(|space| SpaceHandle {
+            inner: self.inner.clone(),
+            space,
+        })
+    }
+
+    /// A Space's current group key (your own secret; handed to a new device by pairing
+    /// or used by [`Mesh::join_space`] on another of your devices). `None` if not joined.
+    pub fn group_key_of(&self, id: SpaceId) -> Option<[u8; 32]> {
+        self.inner.registry.get(&id).map(|s| s.group_key())
+    }
+
+    fn space_dir(&self, id: SpaceId) -> PathBuf {
+        self.inner.data_dir.join("spaces").join(id.to_hex())
+    }
+
+    /// The active Space's state (the default Space is always present as a fallback).
+    fn active_state(&self) -> Arc<SpaceState> {
+        let id = *self.inner.active.lock().expect("active lock");
+        self.inner
+            .registry
+            .get(&id)
+            .or_else(|| self.inner.registry.get(&SpaceId::default_space()))
+            .expect("a space is always present")
+    }
+
+    // ---- active-Space delegating API (unchanged surface for apps) ----
+
+    /// This device's group key for the active Space.
+    pub fn group_key(&self) -> [u8; 32] {
+        self.active_state().group_key()
+    }
+
+    /// Enter "add a device" mode for the active Space: answer ONE pairing attempt
+    /// presenting `code`, then disarm. Run this on the device the user is joining FROM.
+    pub fn arm_pairing(&self, code: &[u8]) {
+        *self.inner.pair_joined.lock().expect("joined lock") = None;
+        *self.inner.pair_armed.lock().expect("armed lock") = Some(ArmedPairing {
+            code: code.to_vec(),
+            space_id: self.active_space(),
+        });
+    }
+
+    /// Leave "add a device" mode without completing a pairing. Safe when not armed.
+    pub fn disarm_pairing(&self) {
+        *self.inner.pair_armed.lock().expect("armed lock") = None;
+    }
+
+    /// Take the endpoint id of a device that just paired in (host side), clearing it.
+    /// The engine has already added it as a sync peer; this is for the app to persist.
+    pub fn take_joined(&self) -> Option<String> {
+        self.inner.pair_joined.lock().expect("joined lock").take()
+    }
+
+    /// For each peer of the active Space that has ever synced, the seconds since that
+    /// last successful round (keyed by endpoint-id string).
+    pub fn last_sync_ages(&self) -> HashMap<String, u64> {
+        self.active_state().last_sync_ages()
+    }
+
+    /// Join the Space hosted by `host` using the shared short `code`: run the SPAKE2
+    /// pairing handshake, receive the `(SpaceId, group key)`, and persist it under
+    /// `data_dir/spaces/<id>/`. **Restart this peer** afterwards to adopt the Space and
+    /// begin syncing.
+    pub async fn pair_with(&self, host: EndpointAddr, code: &[u8]) -> Result<()> {
+        let (id, gk) = pair::join(self.inner.router.endpoint(), host, code)
+            .await
+            .map_err(|e| CoreError::Pairing(e.to_string()))?;
+        let dir = self.space_dir(id);
+        std::fs::create_dir_all(&dir)?;
+        keys::write_key(&dir.join("group.key"), &gk)?;
+        // Give a freshly-joined non-default Space a placeholder name (don't clobber the
+        // default Space's name or an existing one).
+        if !id.is_default() && !dir.join("name").exists() {
+            let _ = space::write_name(&dir, "Linked space");
+        }
+        Ok(())
+    }
+
+    /// Revoke access to the active Space by rotating to a NEW group key (persisted for
+    /// next start). The evicted device's old key stops authenticating. **Restart this
+    /// device, then re-pair the devices you keep.** (Live epoch rotation is M3.)
+    pub fn rotate_group_key(&self) -> Result<[u8; 32]> {
+        let new = keys::generate();
+        let dir = self.space_dir(self.active_space());
+        keys::write_key(&dir.join("group.key"), &new)?;
+        Ok(new)
+    }
+
+    /// Add a peer to keep the active Space converged with. The background loop syncs
+    /// with it continuously (and immediately). Idempotent by endpoint id.
+    pub async fn add_peer(&self, peer: EndpointAddr) {
+        if self.active_state().add_peer(peer).await {
+            self.inner.changed.notify_waiters();
+        }
+    }
+
+    /// Stop keeping a peer converged in the active Space. Returns whether it was present.
     pub async fn remove_peer(&self, id: &str) -> bool {
         let Ok(addr) = endpoint_addr_from_id(id) else {
             return false;
         };
-        let mut peers = self.inner.peers.lock().await;
-        let before = peers.len();
-        peers.retain(|p| p.id != addr.id);
-        let removed = peers.len() != before;
-        drop(peers);
+        let removed = self.active_state().remove_peer(addr.id).await;
         if removed {
             self.inner.changed.notify_waiters();
         }
         removed
     }
 
-    /// Tell the engine the local replica just changed, so it syncs + persists now
-    /// instead of waiting for the next interval. Call after writing via [`Mesh::doc`].
+    /// Tell the engine the local replica just changed, so it syncs + persists now.
     pub fn announce_change(&self) {
         self.inner.changed.notify_waiters();
     }
 
-    /// Dial one peer and run a single sync round now (initiator). Both replicas
-    /// converge. Pending, not lost, if the peer is unreachable.
+    /// Dial one peer and run a single active-Space sync round now (initiator).
     pub async fn sync_with(&self, peer: impl Into<EndpointAddr>) -> Result<()> {
-        sync_peer(&self.inner, peer.into()).await
+        sync_peer(&self.inner, &self.active_state(), peer.into()).await
     }
 
-    /// Sync once with every known peer (best-effort; unreachable peers are skipped).
+    /// Sync the active Space once with every known peer (best-effort).
     pub async fn sync_all(&self) -> Result<()> {
-        let peers = self.inner.peers.lock().await.clone();
-        for p in peers {
-            let _ = sync_peer(&self.inner, p).await;
+        let space = self.active_state();
+        for p in space.peers().await {
+            let _ = sync_peer(&self.inner, &space, p).await;
         }
         Ok(())
     }
 
-    /// The live replica handle. Apps define their own schema on this.
+    /// The active Space's live replica handle. Apps define their own schema on this.
     pub fn doc(&self) -> SharedDoc {
-        self.inner.doc.clone()
+        self.active_state().doc()
     }
 
-    /// BLOB PRIMITIVE — serve a file. Imports `path` into the content-addressed
-    /// store and returns its [`Hash`]; served by hash to any peer that connects,
-    /// kept alive for the life of this `Mesh`.
+    /// BLOB PRIMITIVE — serve a file from the active Space. Imports `path` into that
+    /// Space's content-addressed store and returns its [`Hash`].
     pub async fn share_file(&self, path: &Path) -> Result<Hash> {
-        let tt = blobs::add_file(&self.inner.blobs_store, path).await?;
-        let hash = tt.hash();
-        self.inner.kept_tags.lock().await.push(tt);
-        Ok(hash)
+        self.active_state().share_file(path).await
     }
 
-    /// BLOB PRIMITIVE — fetch a file by `hash` from `peer`, writing it to `dest`.
-    /// Resumes from partial data; BLAKE3-verified end to end.
+    /// BLOB PRIMITIVE — fetch a file by `hash` from `peer` in the active Space, writing
+    /// it to `dest`. Resumes from partial data; BLAKE3-verified end to end.
     pub async fn fetch_file(
         &self,
         peer: impl Into<EndpointAddr>,
         hash: Hash,
         dest: &Path,
     ) -> Result<()> {
-        let connect = self.inner.router.endpoint().connect(peer, iroh_blobs::ALPN);
-        let conn = tokio::time::timeout(CONNECT_TIMEOUT, connect)
-            .await
-            .map_err(|_| CoreError::Unreachable("connect timed out".into()))?
-            .map_err(|e| CoreError::Unreachable(e.to_string()))?;
-        blobs::fetch_to(
-            &self.inner.blobs_store,
-            conn,
+        fetch_for_space(
+            &self.inner,
+            &self.active_state(),
+            peer.into(),
             hash,
             dest,
-            &self.inner.group_key,
+            |_, _| {},
         )
         .await
     }
 
-    /// BLOB PRIMITIVE — fetch a file by `hash` from `peer`, reporting live progress
-    /// via `on_progress(bytes_downloaded, relayed)`. Resumes from partial data;
-    /// BLAKE3-verified end to end.
+    /// Like [`Mesh::fetch_file`], reporting live progress via `on_progress(bytes, relayed)`.
     pub async fn fetch_file_with_progress(
         &self,
         peer: impl Into<EndpointAddr>,
@@ -392,42 +482,150 @@ impl Mesh {
         dest: &Path,
         on_progress: impl FnMut(u64, bool),
     ) -> Result<()> {
-        let connect = self.inner.router.endpoint().connect(peer, iroh_blobs::ALPN);
-        let conn = tokio::time::timeout(CONNECT_TIMEOUT, connect)
-            .await
-            .map_err(|_| CoreError::Unreachable("connect timed out".into()))?
-            .map_err(|e| CoreError::Unreachable(e.to_string()))?;
-        blobs::fetch_to_with_progress(
-            &self.inner.blobs_store,
-            conn,
+        fetch_for_space(
+            &self.inner,
+            &self.active_state(),
+            peer.into(),
             hash,
             dest,
-            &self.inner.group_key,
             on_progress,
         )
         .await
     }
 
-    /// Persist the replica now (a compacted snapshot). Also done automatically by
-    /// the background loop and on shutdown.
+    /// Persist the active Space's replica now (a compacted snapshot).
     pub async fn save(&self) -> Result<()> {
-        save_doc(&self.inner).await
+        self.active_state().save().await
     }
 
-    /// Gracefully stop: halt the background loop, persist the replica, and shut
-    /// down the router + blob store.
+    /// Gracefully stop: halt the background loop, persist every Space, and shut down the
+    /// router + every Space's blob store.
     pub async fn shutdown(self) -> Result<()> {
         self.inner.cancel.cancel();
-        let _ = save_doc(&self.inner).await;
+        // Router shutdown drives each Space's blobs *provider* shutdown via the
+        // BlobDispatcher; then persist + close each Space's store.
         let _ = self.inner.router.shutdown().await;
-        let _ = self.inner.blobs_store.shutdown().await;
+        for space in self.inner.registry.all() {
+            space.shutdown().await;
+        }
         Ok(())
     }
 }
 
+/// A scoped handle to one Space. Mirrors the active-Space [`Mesh`] methods but always
+/// addresses this specific Space — for the GUI's Space picker and an MCP server bound
+/// to exactly one Space (M6).
+#[derive(Clone)]
+pub struct SpaceHandle {
+    inner: Arc<Inner>,
+    space: Arc<SpaceState>,
+}
+
+impl SpaceHandle {
+    /// This Space's id.
+    pub fn id(&self) -> SpaceId {
+        self.space.id()
+    }
+
+    /// This Space's friendly name.
+    pub fn name(&self) -> String {
+        self.space.name().to_string()
+    }
+
+    /// Whether this is the device's default Space.
+    pub fn is_default(&self) -> bool {
+        self.space.is_default()
+    }
+
+    /// This Space's live replica handle.
+    pub fn doc(&self) -> SharedDoc {
+        self.space.doc()
+    }
+
+    /// This Space's group key.
+    pub fn group_key(&self) -> [u8; 32] {
+        self.space.group_key()
+    }
+
+    /// Add a peer to keep this Space converged with.
+    pub async fn add_peer(&self, peer: EndpointAddr) {
+        if self.space.add_peer(peer).await {
+            self.inner.changed.notify_waiters();
+        }
+    }
+
+    /// Stop keeping a peer converged in this Space. Returns whether it was present.
+    pub async fn remove_peer(&self, id: &str) -> bool {
+        let Ok(addr) = endpoint_addr_from_id(id) else {
+            return false;
+        };
+        let removed = self.space.remove_peer(addr.id).await;
+        if removed {
+            self.inner.changed.notify_waiters();
+        }
+        removed
+    }
+
+    /// Dial one peer and run a single sync round for this Space now (initiator).
+    pub async fn sync_with(&self, peer: impl Into<EndpointAddr>) -> Result<()> {
+        sync_peer(&self.inner, &self.space, peer.into()).await
+    }
+
+    /// Sync this Space once with every known peer (best-effort).
+    pub async fn sync_all(&self) -> Result<()> {
+        for p in self.space.peers().await {
+            let _ = sync_peer(&self.inner, &self.space, p).await;
+        }
+        Ok(())
+    }
+
+    /// Serve a file from this Space.
+    pub async fn share_file(&self, path: &Path) -> Result<Hash> {
+        self.space.share_file(path).await
+    }
+
+    /// Fetch a file by `hash` from `peer` in this Space.
+    pub async fn fetch_file(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        hash: Hash,
+        dest: &Path,
+    ) -> Result<()> {
+        fetch_for_space(&self.inner, &self.space, peer.into(), hash, dest, |_, _| {}).await
+    }
+
+    /// Like [`SpaceHandle::fetch_file`], reporting live progress.
+    pub async fn fetch_file_with_progress(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        hash: Hash,
+        dest: &Path,
+        on_progress: impl FnMut(u64, bool),
+    ) -> Result<()> {
+        fetch_for_space(
+            &self.inner,
+            &self.space,
+            peer.into(),
+            hash,
+            dest,
+            on_progress,
+        )
+        .await
+    }
+
+    /// Persist this Space's replica now.
+    pub async fn save(&self) -> Result<()> {
+        self.space.save().await
+    }
+
+    /// Tell the engine this Space changed, so it syncs + persists now.
+    pub fn announce_change(&self) {
+        self.inner.changed.notify_waiters();
+    }
+}
+
 /// Build a connectable [`EndpointAddr`] from a peer's endpoint-id string. Discovery
-/// (mainline DHT / n0 DNS, per the configured infra) resolves the actual paths, so an
-/// id alone is enough to dial a peer that is online. Used by pairing + device linking.
+/// resolves the actual paths, so an id alone is enough to dial a peer that is online.
 pub fn endpoint_addr_from_id(id: &str) -> Result<EndpointAddr> {
     let id: iroh::EndpointId = id
         .trim()
@@ -436,61 +634,68 @@ pub fn endpoint_addr_from_id(id: &str) -> Result<EndpointAddr> {
     Ok(EndpointAddr::from(id))
 }
 
-/// Parse a content [`Hash`] from its string form (as stored in a file offer), so
-/// apps can move blobs by hash without depending on `iroh_blobs` directly.
+/// Parse a content [`Hash`] from its string form (as stored in a file offer).
 pub fn hash_from_str(s: &str) -> Result<Hash> {
     s.trim()
         .parse::<Hash>()
         .map_err(|e| CoreError::Other(anyhow::anyhow!("invalid file hash: {e}")))
 }
 
-/// Background loop: on a change/new-peer ping or every [`SYNC_INTERVAL`], sync with
-/// every known peer and persist the replica. Exits when the engine shuts down.
+/// Background loop: on a change/new-peer/new-Space ping or every [`SYNC_INTERVAL`], sync
+/// every Space with each of its peers and persist each Space. One independent,
+/// cancellable task per `(Space, peer)`, so a slow/dead peer in one Space can't stall
+/// any other peer or Space. Exits when the engine shuts down.
 async fn sync_loop(inner: Arc<Inner>) {
-    // One independent, cancellable sync task per peer (keyed by endpoint id), so a
-    // slow/dead peer is fully isolated. Each tick we reconcile: spawn tasks for newly
-    // added peers, cancel tasks for peers that were removed.
-    let mut tasks: std::collections::HashMap<iroh::EndpointId, CancellationToken> =
-        std::collections::HashMap::new();
+    let mut tasks: HashMap<(SpaceId, EndpointId), CancellationToken> = HashMap::new();
     loop {
         tokio::select! {
             _ = inner.cancel.cancelled() => break,
             _ = inner.changed.notified() => {}
             _ = tokio::time::sleep(SYNC_INTERVAL) => {}
         }
-        let peers = inner.peers.lock().await.clone();
-        let current: std::collections::HashSet<iroh::EndpointId> =
-            peers.iter().map(|p| p.id).collect();
-        // Spawn for newly-added peers.
-        for p in &peers {
-            tasks.entry(p.id).or_insert_with(|| {
-                let token = CancellationToken::new();
-                tokio::spawn(peer_sync_task(inner.clone(), p.clone(), token.clone()));
-                token
-            });
+        let spaces = inner.registry.all();
+        let mut current: HashSet<(SpaceId, EndpointId)> = HashSet::new();
+        for space in &spaces {
+            for p in space.peers().await {
+                let key = (space.id(), p.id);
+                current.insert(key);
+                tasks.entry(key).or_insert_with(|| {
+                    let token = CancellationToken::new();
+                    tokio::spawn(peer_sync_task(
+                        inner.clone(),
+                        space.clone(),
+                        p.clone(),
+                        token.clone(),
+                    ));
+                    token
+                });
+            }
+            let _ = space.save().await;
         }
-        // Cancel + forget tasks for peers no longer in the set.
-        tasks.retain(|id, token| {
-            if current.contains(id) {
+        // Cancel + forget tasks for (Space, peer) pairs no longer present (peer removed
+        // or Space left).
+        tasks.retain(|key, token| {
+            if current.contains(key) {
                 true
             } else {
                 token.cancel();
                 false
             }
         });
-        let _ = save_doc(&inner).await;
     }
-    // On shutdown, stop every peer task.
     for (_, token) in tasks {
         token.cancel();
     }
 }
 
-/// One independent task per peer: re-sync on a change/new-peer ping or every
-/// interval, each round bounded by timeouts. Exits on engine shutdown or when this
-/// peer is removed (its `token` is cancelled). Isolation is the whole point — a dead
-/// peer here spins on its own without touching any other peer or persistence.
-async fn peer_sync_task(inner: Arc<Inner>, peer: EndpointAddr, token: CancellationToken) {
+/// One independent task per `(Space, peer)`: re-sync on a ping or every interval, each
+/// round bounded by timeouts. Exits on shutdown or when this pair is removed.
+async fn peer_sync_task(
+    inner: Arc<Inner>,
+    space: Arc<SpaceState>,
+    peer: EndpointAddr,
+    token: CancellationToken,
+) {
     loop {
         tokio::select! {
             _ = inner.cancel.cancelled() => break,
@@ -498,79 +703,86 @@ async fn peer_sync_task(inner: Arc<Inner>, peer: EndpointAddr, token: Cancellati
             _ = inner.changed.notified() => {}
             _ = tokio::time::sleep(SYNC_INTERVAL) => {}
         }
-        let _ = sync_peer(&inner, peer.clone()).await;
+        let _ = sync_peer(&inner, &space, peer.clone()).await;
     }
 }
 
-/// Dial a peer and drive one initiator-side sync round, bounded by timeouts so an
-/// unreachable/slow peer fails cleanly instead of hanging.
-async fn sync_peer(inner: &Arc<Inner>, peer: EndpointAddr) -> Result<()> {
+/// Dial a peer and drive one initiator-side sync round for `space`, bounded by timeouts
+/// so an unreachable/slow peer fails cleanly instead of hanging.
+async fn sync_peer(inner: &Arc<Inner>, space: &Arc<SpaceState>, peer: EndpointAddr) -> Result<()> {
     let peer_id = peer.id;
     let connect = inner.router.endpoint().connect(peer, MESH_ALPN);
     let conn = tokio::time::timeout(CONNECT_TIMEOUT, connect)
         .await
         .map_err(|_| CoreError::Unreachable("connect timed out".into()))?
         .map_err(|e| CoreError::Unreachable(e.to_string()))?;
-    let round = inner.sync.clone().initiate_sync(conn);
+    let round = space.sync().clone().initiate_sync(conn);
     tokio::time::timeout(SYNC_ROUND_TIMEOUT, round)
         .await
         .map_err(|_| CoreError::Sync("sync round timed out".into()))?
         .map_err(|e| CoreError::Sync(e.to_string()))?;
-    // Record a successful round so the UI can show per-device sync recency.
-    if let Ok(mut m) = inner.last_sync.lock() {
-        m.insert(peer_id, std::time::SystemTime::now());
-    }
+    space.record_sync(peer_id);
     Ok(())
 }
 
-/// Write a compacted snapshot durably: fsync the bytes, atomically rename into
-/// place, then fsync the directory — so a completed save survives power loss and a
-/// crash mid-write can't corrupt the replica. Blocking fs work runs off the runtime.
-async fn save_doc(inner: &Arc<Inner>) -> Result<()> {
-    let plain = doc::save(&inner.doc).await;
-    let bytes = atrest::encrypt(&inner.atrest_key, &plain); // encrypt at rest
-    let path = inner.doc_path.clone();
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        use std::io::Write;
-        let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = path.with_extension(format!("automerge.tmp.{}.{}", std::process::id(), seq));
-        {
-            let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
-        }
-        std::fs::rename(&tmp, &path)?;
-        if let Some(dir) = path.parent() {
-            if let Ok(d) = std::fs::File::open(dir) {
-                let _ = d.sync_all(); // best-effort dir fsync (may no-op on Windows)
-            }
-        }
-        Ok(())
-    })
+/// Dial a peer on the blobs ALPN and fetch `hash` for `space` (its store, key, and id).
+async fn fetch_for_space(
+    inner: &Arc<Inner>,
+    space: &Arc<SpaceState>,
+    peer: EndpointAddr,
+    hash: Hash,
+    dest: &Path,
+    on_progress: impl FnMut(u64, bool),
+) -> Result<()> {
+    let connect = inner.router.endpoint().connect(peer, iroh_blobs::ALPN);
+    let conn = tokio::time::timeout(CONNECT_TIMEOUT, connect)
+        .await
+        .map_err(|_| CoreError::Unreachable("connect timed out".into()))?
+        .map_err(|e| CoreError::Unreachable(e.to_string()))?;
+    let group_key = space.group_key();
+    let space_id = space.id();
+    blobs::fetch_to_with_progress(
+        space.store(),
+        conn,
+        hash,
+        dest,
+        &group_key,
+        &space_id,
+        on_progress,
+    )
     .await
-    .map_err(|e| anyhow::anyhow!("save task failed: {e}"))??;
-    Ok(())
 }
 
-/// Load the replica from `path`, recovering from a corrupt/torn/empty snapshot by
-/// moving it aside and starting fresh (it re-converges from peers — a local-first
-/// app must never brick on a damaged file). A missing file is the normal first run.
-fn load_or_recover(path: &Path, actor: automerge::ActorId, key: &[u8; 32]) -> SharedDoc {
-    match std::fs::read(path) {
-        Ok(bytes) if !bytes.is_empty() => match atrest::decrypt(key, &bytes) {
-            Some(plain) => match doc::load(&plain, actor.clone()) {
-                Ok(d) => d,
-                Err(_) => move_aside_and_fresh(path, actor),
-            },
-            None => move_aside_and_fresh(path, actor), // wrong key / corrupt / tampered
-        },
-        Ok(_) => move_aside_and_fresh(path, actor), // present but empty (failed write)
-        Err(_) => doc::open(actor),                 // missing (normal) or unreadable
+/// Migrate a pre-Spaces flat data directory (`data_dir/{doc.automerge,group.key,
+/// atrest.key,blobs/}`) into the default Space's subdir, the first time a device with an
+/// old single-group install starts under the Spaces layout. A no-op on fresh installs
+/// (nothing to move) and on already-migrated dirs (`spaces/` already exists).
+fn migrate_flat_layout(data_dir: &Path, spaces_root: &Path) -> Result<()> {
+    if spaces_root.exists() {
+        return Ok(());
     }
-}
-
-fn move_aside_and_fresh(path: &Path, actor: automerge::ActorId) -> SharedDoc {
-    let aside = path.with_extension(format!("automerge.corrupt.{}", std::process::id()));
-    let _ = std::fs::rename(path, &aside);
-    doc::open(actor)
+    let flat_doc = data_dir.join("doc.automerge");
+    let flat_group = data_dir.join("group.key");
+    let flat_atrest = data_dir.join("atrest.key");
+    let flat_blobs = data_dir.join("blobs");
+    let has_flat =
+        flat_doc.exists() || flat_group.exists() || flat_atrest.exists() || flat_blobs.exists();
+    if !has_flat {
+        return Ok(());
+    }
+    let default_dir = spaces_root.join(SpaceId::default_space().to_hex());
+    std::fs::create_dir_all(&default_dir)?;
+    for (src, name) in [
+        (flat_doc, "doc.automerge"),
+        (flat_group, "group.key"),
+        (flat_atrest, "atrest.key"),
+    ] {
+        if src.exists() {
+            let _ = std::fs::rename(&src, default_dir.join(name));
+        }
+    }
+    if flat_blobs.is_dir() {
+        let _ = std::fs::rename(&flat_blobs, default_dir.join("blobs"));
+    }
+    Ok(())
 }

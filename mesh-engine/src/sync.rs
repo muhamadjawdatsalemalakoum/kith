@@ -23,7 +23,13 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, Mutex};
 
+use crate::space::{SpaceId, SpaceRegistry};
+
 type HmacSha256 = Hmac<Sha256>;
+
+/// Bytes of the [`SpaceId`] that prefix every inbound sync stream, so the dispatcher
+/// can route a connection to the right Space before any auth or merge.
+const SPACE_ID_LEN: usize = 32;
 
 /// Hard cap on a single sync frame — defends against a malicious/huge length prefix
 /// (an attacker-controlled `u64` length would otherwise allocate unboundedly = OOM).
@@ -76,33 +82,25 @@ pub struct MeshSync {
     sync_finished: mpsc::Sender<Automerge>,
     /// The shared group secret. Both peers must prove possession before any sync.
     group_key: [u8; 32],
+    /// Which Space this handler syncs. The initiator writes it first on the wire; the
+    /// dispatcher reads it to select this handler in the first place.
+    space_id: SpaceId,
 }
 
 impl MeshSync {
-    /// Build a handler around a fresh doc.
-    pub fn new(
-        doc: Automerge,
-        group_key: [u8; 32],
-        sync_finished: mpsc::Sender<Automerge>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            inner: Arc::new(Mutex::new(doc)),
-            sync_finished,
-            group_key,
-        })
-    }
-
     /// Build a handler that shares an EXISTING doc handle, so inbound sync and the
-    /// device's primary doc are the same live document.
+    /// device's primary doc are the same live document, bound to one Space.
     pub fn with_shared(
         inner: Arc<Mutex<Automerge>>,
         group_key: [u8; 32],
+        space_id: SpaceId,
         sync_finished: mpsc::Sender<Automerge>,
     ) -> Arc<Self> {
         Arc::new(Self {
             inner,
             sync_finished,
             group_key,
+            space_id,
         })
     }
 
@@ -192,9 +190,12 @@ impl MeshSync {
         Ok(Some(sync::Message::decode(&buffer)?))
     }
 
-    /// Initiator (dialer): opens the bi-stream. Order: generate -> send -> recv.
+    /// Initiator (dialer): opens the bi-stream, names the Space, then authenticates.
+    /// Order: send SpaceId -> auth -> generate -> send -> recv.
     pub async fn initiate_sync(self: Arc<Self>, conn: Connection) -> Result<()> {
         let (mut send, mut recv) = conn.open_bi().await?;
+        // Name the Space first so the responder routes to the right replica.
+        send.write_all(self.space_id.as_bytes()).await?;
         self.auth_initiator(&mut send, &mut recv).await?; // prove group membership first
         let mut doc = self.fork_doc().await;
         let mut state = sync::State::new();
@@ -218,10 +219,16 @@ impl MeshSync {
         Ok(())
     }
 
-    /// Responder (accepter): takes the bi-stream. Order: recv -> generate -> send
-    /// (mirror of the initiator — that asymmetry is what makes both-done converge).
-    pub async fn respond_sync(&self, conn: Connection) -> Result<()> {
-        let (mut send, mut recv) = conn.accept_bi().await?;
+    /// Responder (accepter): the dispatcher has already accepted the bi-stream and
+    /// consumed the SpaceId prefix to select this handler; we take the streams from here.
+    /// Order: recv -> generate -> send (mirror of the initiator — that asymmetry is what
+    /// makes both-done converge).
+    pub async fn respond_streams(
+        &self,
+        conn: Connection,
+        mut send: SendStream,
+        mut recv: RecvStream,
+    ) -> Result<()> {
         self.auth_responder(&mut send, &mut recv).await?; // reject non-members (no merge)
         let mut doc = self.fork_doc().await;
         let mut state = sync::State::new();
@@ -246,13 +253,55 @@ impl MeshSync {
     }
 }
 
-impl ProtocolHandler for MeshSync {
+/// Read the [`SpaceId`] that prefixes an inbound sync stream, time-boxed.
+async fn read_space_id(recv: &mut RecvStream) -> Result<SpaceId> {
+    let mut buf = [0u8; SPACE_ID_LEN];
+    read_exact_timed(recv, &mut buf).await?;
+    Ok(SpaceId::from_bytes(buf))
+}
+
+/// The single MESH_ALPN accept handler. It reads the SpaceId off the first stream,
+/// looks up the matching Space, and runs that Space's auth + sync against that Space's
+/// replica — so one endpoint multiplexes every Space the device is in. A connection
+/// naming a Space this device isn't in is refused before any auth or merge.
+#[derive(Clone)]
+pub struct SyncDispatcher {
+    registry: Arc<SpaceRegistry>,
+}
+
+impl SyncDispatcher {
+    pub fn new(registry: Arc<SpaceRegistry>) -> Self {
+        Self { registry }
+    }
+}
+
+// Redacted Debug (ProtocolHandler requires Debug) — never expose internals.
+impl std::fmt::Debug for SyncDispatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SyncDispatcher { .. }")
+    }
+}
+
+/// `AcceptError::from_err` wants a sized `Error`; iroh's connection errors and
+/// `anyhow::Error` aren't directly convertible, so carry the message through a std
+/// `io::Error` (sized, `Error + Send + Sync`).
+pub(crate) fn acc_err(e: impl std::fmt::Display) -> AcceptError {
+    AcceptError::from_err(std::io::Error::other(e.to_string()))
+}
+
+impl ProtocolHandler for SyncDispatcher {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
-        // `AcceptError::from_err` wants a sized `Error`; anyhow::Error isn't one, so
-        // carry the message through a std `io::Error` (sized, Error + Send + Sync).
-        self.respond_sync(conn)
+        let (send, mut recv) = conn.accept_bi().await.map_err(acc_err)?;
+        let space_id = read_space_id(&mut recv).await.map_err(acc_err)?;
+        let Some(space) = self.registry.get(&space_id) else {
+            // Not a Space this device is in — refuse before any auth/merge.
+            return Err(acc_err("unknown space"));
+        };
+        space
+            .sync()
+            .respond_streams(conn, send, recv)
             .await
-            .map_err(|e| AcceptError::from_err(std::io::Error::other(e.to_string())))?;
+            .map_err(acc_err)?;
         Ok(())
     }
 }

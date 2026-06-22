@@ -6,6 +6,22 @@ use std::path::Path;
 
 use crate::error::{CoreError, Result};
 
+/// Generate 32 fresh random bytes (a new group key, at-rest key, or Space nonce).
+/// Reuses iroh's CSPRNG so no extra RNG dependency is pulled in.
+pub fn generate() -> [u8; 32] {
+    iroh::SecretKey::generate().to_bytes()
+}
+
+/// Persist a 32-byte secret to `path` atomically (temp file + rename) and harden its
+/// permissions. Used to seed/rotate a Space's `group.key`.
+pub fn write_key(path: &Path, key: &[u8; 32]) -> Result<()> {
+    let tmp = path.with_extension("key.tmp");
+    std::fs::write(&tmp, key)?;
+    std::fs::rename(&tmp, path)?;
+    harden_permissions(path);
+    Ok(())
+}
+
 /// Load a 32-byte secret from `path`, or generate + persist one if absent.
 pub fn load_or_create(path: &Path) -> Result<[u8; 32]> {
     match std::fs::read(path) {

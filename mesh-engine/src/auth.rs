@@ -38,7 +38,9 @@ fn random_nonce() -> [u8; NONCE_LEN] {
     n
 }
 
-async fn read_exact_timed(recv: &mut RecvStream, buf: &mut [u8]) -> Result<()> {
+/// Read exactly `buf.len()` bytes, time-boxed. Shared with the blob dispatcher so the
+/// SpaceId prefix and the auth handshake use the same bounded read.
+pub(crate) async fn read_exact_timed(recv: &mut RecvStream, buf: &mut [u8]) -> Result<()> {
     match tokio::time::timeout(READ_TIMEOUT, recv.read_exact(buf)).await {
         Err(_) => anyhow::bail!("blob auth handshake stalled"),
         Ok(r) => {

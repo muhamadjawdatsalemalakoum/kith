@@ -160,6 +160,47 @@ forget with tombstones), a `Memory` facade, and the MCP surface
 
 ---
 
+## Engine v2 — Spaces, per-device roles, revocation (in progress)
+
+Closing the gap between the stated vision (a multi-Space, per-device-identity,
+role-aware, revocable mesh) and the single-group engine that shipped. Sequenced
+substrate-first; each milestone lands with green tests.
+
+### EV2-M1 — Spaces (multi-group substrate) · ✅ DONE
+A device now runs **N independent encrypted Spaces** over ONE endpoint + ONE device
+identity. Each Space owns its group key, at-rest key, replica, blob store, peers, and
+`data_dir/spaces/<id>/` subdir. The sync, blob, and pairing accept handlers route by a
+`SpaceId` carried first on the wire, so edits in Space A converge only to A's members
+and never leak into B.
+- **Default Space:** every device has one with a well-known constant `SpaceId`
+  (independent of the group key, so it survives epoch rotation). This preserves the
+  pre-Spaces single-group behaviour — two devices with the same key still converge — and
+  keeps the existing apps working on the **active Space** (`Mesh::doc` etc.).
+- **API:** `create_space` / `join_space` / `list_spaces` / `leave_space` /
+  `set_active_space` / `space(id)` (a scoped `SpaceHandle`); pairing hands over
+  `(SpaceId, group key)`. A pre-Spaces flat install is migrated into the default Space.
+- **Tests:** `two_spaces_isolated`, `three_peer_convergence_per_space`,
+  `space_carry_forward`, `cross_space_blob_isolation`,
+  `migrates_flat_layout_into_default_space` — plus every prior test still green, and the
+  relay-path test. `clippy -D warnings` + `fmt` clean; `forbid(unsafe_code)` intact.
+
+### EV2-M2 — Per-device identity, membership & roles · ⬜ NEXT
+Membership rooted in **EndpointId** (not mere possession of the shared key), with signed
+membership changes and enforceable `Admin` / `Writer` / `Reader` roles (cryptographic
+read-only against honest peers via per-writer change signing).
+
+### EV2-M3 — Revocation, key epochs & audit log · ⬜
+Epoch rekey on device removal (post-removal confidentiality for future data — **not**
+forward secrecy for already-synced data), re-encrypt at rest under the new epoch, and a
+hash-chained per-Space audit log.
+
+> Later (not in the current substrate pass): `files.read` (EV2-M4), self-hosted relay
+> (EV2-M5), MCP per-Space binding (EV2-M6), keychain + encrypted export/recovery
+> (EV2-M7), multi-stream throughput + a measured benchmark (EV2-M8), and wiring every
+> capability through the desktop GUI (EV2-M10).
+
+---
+
 ## Backlog (buckets — unscheduled, pull from the map one at a time)
 
 **Fast-follow apps** (all thin, on engine + mesh-mcp):

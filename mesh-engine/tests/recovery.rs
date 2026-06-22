@@ -5,7 +5,15 @@
 mod common;
 use common::{get_probe, local_mesh, put_probe};
 
-use mesh_engine::{CoreConfig, Mesh};
+use mesh_engine::{CoreConfig, Mesh, SpaceId};
+
+/// The default Space's data subdir under a data dir (the replica + keys live here now
+/// that the engine is multi-Space: `data_dir/spaces/<default-id>/…`).
+fn default_space_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir
+        .join("spaces")
+        .join(SpaceId::default_space().to_hex())
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn corrupt_replica_recovers_fresh() {
@@ -17,8 +25,9 @@ async fn corrupt_replica_recovers_fresh() {
     }
 
     // Corrupt the snapshot on disk (simulate a torn write / disk damage).
+    let space_dir = default_space_dir(dir.path());
     std::fs::write(
-        dir.path().join("doc.automerge"),
+        space_dir.join("doc.automerge"),
         b"not a valid automerge document",
     )
     .unwrap();
@@ -34,7 +43,7 @@ async fn corrupt_replica_recovers_fresh() {
     );
 
     // The corrupt snapshot is preserved aside rather than silently destroyed.
-    let kept_aside = std::fs::read_dir(dir.path())
+    let kept_aside = std::fs::read_dir(&space_dir)
         .unwrap()
         .flatten()
         .any(|e| e.file_name().to_string_lossy().contains("corrupt"));
@@ -75,7 +84,7 @@ async fn replica_is_encrypted_at_rest() {
     a.shutdown().await.unwrap();
 
     // The persisted snapshot must NOT contain the value in cleartext.
-    let bytes = std::fs::read(dir.path().join("doc.automerge")).unwrap();
+    let bytes = std::fs::read(default_space_dir(dir.path()).join("doc.automerge")).unwrap();
     let needle = b"topsecret-value";
     let leaked = bytes.windows(needle.len()).any(|w| w == needle);
     assert!(!leaked, "the value must not appear in cleartext on disk");
