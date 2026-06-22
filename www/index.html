@@ -45,8 +45,9 @@
       background:rgba(10,15,26,.72);border-bottom:1px solid transparent;transition:border-color .2s}
     header.site.scrolled{border-bottom-color:var(--line)}
     .nav-inner{display:flex;align-items:center;justify-content:space-between;padding:14px 0;max-width:var(--maxw);margin:0 auto;padding-left:24px;padding-right:24px}
-    .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;color:var(--text)}
-    .brand img{width:28px;height:28px}
+    .brand{display:inline-flex;align-items:center;line-height:0}
+    .brand img{height:30px;width:auto;display:block}
+    .brand:hover{opacity:.85}
     nav.links a{color:var(--muted);margin-left:22px;font-size:14px}
     nav.links a:hover{color:var(--text);text-decoration:none}
     .nav-cta{display:inline-flex;align-items:center;height:38px;padding:0 16px;border-radius:10px;
@@ -187,7 +188,7 @@
 <body>
   <header class="site" id="hdr">
     <div class="nav-inner">
-      <span class="brand"><img src="icon.png" alt="" /> Kith</span>
+      <a class="brand" href="#" aria-label="Kith — home"><img src="logo-mark.png" alt="Kith" width="453" height="160" /></a>
       <nav class="links">
         <a href="#journey">Set up</a>
         <a href="#memory">Memory</a>
