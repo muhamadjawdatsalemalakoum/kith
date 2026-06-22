@@ -15,3 +15,6 @@ apps/desktop/gen/
 Thumbs.db
 .idea/
 .vscode/
+
+# local screenshot scratch
+.shots/
