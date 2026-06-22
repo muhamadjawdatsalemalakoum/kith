@@ -70,9 +70,13 @@ impl ProtocolHandler for BlobDispatcher {
         crate::auth::responder(&group_key, &mut send, &mut recv)
             .await
             .map_err(acc_err)?;
+        // Membership gate (enforced Spaces): root content access in EndpointId, not mere
+        // group-key possession — so a removed device (it keeps the stable group key) and
+        // any non-member are refused before a byte is served. No-op for permissive Spaces.
+        space.gate(&conn).map_err(acc_err)?;
         let _ = send.finish();
-        // Authenticated for this Space: hand the rest of the connection to that Space's
-        // stock blobs provider, which loops accepting the subsequent request stream(s).
+        // Authenticated + authorized for this Space: hand the rest of the connection to
+        // that Space's stock blobs provider, which loops accepting the request stream(s).
         space.blobs_accept(conn).await
     }
 

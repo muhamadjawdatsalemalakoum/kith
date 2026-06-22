@@ -6,7 +6,7 @@
 //! membership log doubles as a tamper-evident audit log.
 
 mod common;
-use common::local_mesh;
+use common::{local_mesh, local_mesh_with_blobs};
 
 use mesh_engine::automerge::transaction::Transactable;
 use mesh_engine::automerge::{ReadDoc, ScalarValue, Value, ROOT};
@@ -186,6 +186,54 @@ async fn at_rest_reencrypted_under_new_epoch() {
     );
 
     a2.shutdown().await.unwrap();
+}
+
+/// Content access is rooted in EndpointId too: a removed device — which still holds the
+/// stable group key — is refused at the blob gate and can no longer fetch a Space's files.
+#[tokio::test(flavor = "multi_thread")]
+async fn removed_device_cannot_fetch_blob() {
+    let work = tempfile::tempdir().unwrap();
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let a = local_mesh_with_blobs(da.path()).await;
+    let b = local_mesh_with_blobs(db.path()).await;
+
+    let sid = a.create_space_with_roles("team").await.unwrap();
+    let key = a.group_key_of(sid).unwrap();
+    a.add_member(sid, &b.endpoint_id(), Role::Writer).unwrap();
+    let bundle = a.space_join_bundle(sid).unwrap();
+    b.join_space_with_roles(sid, key, &bundle, "team")
+        .await
+        .unwrap();
+
+    let a_s = a.space(sid).unwrap();
+    let b_s = b.space(sid).unwrap();
+
+    // A shares two files while B is a member. B fetches only the first.
+    let src1 = work.path().join("one.txt");
+    let src2 = work.path().join("two.txt");
+    std::fs::write(&src1, b"first bytes").unwrap();
+    std::fs::write(&src2, b"second bytes").unwrap();
+    let h1 = a_s.share_file(&src1).await.unwrap();
+    let h2 = a_s.share_file(&src2).await.unwrap();
+
+    // Positive control: while B is a member it can fetch A's first file.
+    let dest1 = work.path().join("got1.txt");
+    b_s.fetch_file(a.endpoint_addr(), h1, &dest1).await.unwrap();
+    assert_eq!(std::fs::read(&dest1).unwrap(), b"first bytes");
+
+    // A removes B. B keeps the group key, but it is no longer a member.
+    a.remove_member(sid, &b.endpoint_id()).await.unwrap();
+
+    // B can no longer fetch the second file (one it never downloaded) — the blob gate
+    // refuses the non-member before a byte is served, despite B still holding the key.
+    let dest2 = work.path().join("got2.txt");
+    let r = b_s.fetch_file(a.endpoint_addr(), h2, &dest2).await;
+    assert!(r.is_err(), "a removed device is refused at the blob gate");
+    assert!(!dest2.exists(), "no bytes served to a removed device");
+
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
 }
 
 /// The membership log doubles as a tamper-evident audit log: it records the lifecycle

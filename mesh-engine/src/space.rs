@@ -691,7 +691,9 @@ impl SpaceState {
 
     /// Membership gate: refuse a peer whose TLS-authenticated EndpointId is not a member
     /// of this Space — even if it proved the group key. No-op for permissive Spaces.
-    fn gate(&self, conn: &Connection) -> Result<()> {
+    /// Applied on both the sync and blob paths so a removed device (which still holds the
+    /// stable group key) can neither sync nor fetch content.
+    pub(crate) fn gate(&self, conn: &Connection) -> Result<()> {
         if !self.enforced() {
             return Ok(());
         }
