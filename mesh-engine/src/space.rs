@@ -34,6 +34,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::doc::SharedDoc;
+use crate::epoch::{self, EpochStore};
 use crate::error::{CoreError, Result};
 use crate::membership::{Membership, Role};
 use crate::sync::MeshSync;
@@ -137,12 +138,18 @@ pub(crate) struct SpaceState {
     id: SpaceId,
     name: String,
     doc_path: PathBuf,
-    /// Current-epoch group key (gates who may sync; derives nothing here — the at-rest
-    /// key is separate). Rotation persists a new key, adopted on restart (M1); live
-    /// epoch rotation is M3.
+    /// Stable group key for the HMAC handshake (defence in depth alongside the
+    /// EndpointId membership gate). It does NOT rotate on revocation; the rotating
+    /// secret is the epoch key (see `epoch_store`).
     group_key: [u8; 32],
-    /// Per-device key encrypting this Space's replica snapshot on disk.
-    atrest_key: [u8; 32],
+    /// Key encrypting this Space's replica snapshot on disk, plus the epoch it is keyed
+    /// under. Permissive Spaces use a per-device `atrest.key` at epoch 0 (no header).
+    /// Enforced Spaces derive it from the current epoch key, so a revocation re-keys
+    /// on-disk data; the snapshot then carries an 8-byte epoch header.
+    atrest_key: StdMutex<[u8; 32]>,
+    atrest_epoch: StdMutex<u64>,
+    /// Signed, rotating epoch keys (enforced Spaces only) — the revocation substrate.
+    epoch_store: Option<StdMutex<EpochStore>>,
     doc: SharedDoc,
     sync: Arc<MeshSync>,
     store: FsStore,
@@ -184,16 +191,35 @@ impl SpaceState {
     ) -> Result<SpaceState> {
         std::fs::create_dir_all(&dir)?;
         let name = read_name(&dir).unwrap_or_else(|| default_name(&id));
-        let atrest_key = keys::load_or_create(&dir.join("atrest.key"))?;
         let group_key = match configured_key {
             Some(k) => k,
             None => keys::load_or_create(&dir.join("group.key"))?,
         };
         let doc_path = dir.join("doc.automerge");
-        let doc = load_or_recover(&doc_path, actor, &atrest_key);
 
-        let store = blobs::open(&dir.join("blobs")).await?;
-        let blobs_protocol = BlobsProtocol::new(&store, None);
+        // Enforced iff a verified membership log is present (created via
+        // `create_space_with_roles` / `join_space_with_roles`).
+        let membership = Membership::open(id, dir.join("members.log"))?;
+
+        // At-rest: enforced Spaces key the snapshot off the current epoch key (so a
+        // revocation re-keys it); permissive Spaces use a per-device file key.
+        let (atrest_key, atrest_epoch, epoch_store, doc) = if membership.is_some() {
+            let store = EpochStore::load(dir.join("epochs.bin"));
+            let eff = store.max_epoch().unwrap_or(0);
+            let at = store
+                .get(eff)
+                .map(|ek| epoch::derive_atrest(&ek.key, &id, eff))
+                .unwrap_or([0u8; 32]);
+            let doc = load_enforced(&doc_path, actor, &store, &id);
+            (at, eff, Some(StdMutex::new(store)), doc)
+        } else {
+            let at = keys::load_or_create(&dir.join("atrest.key"))?;
+            let doc = load_or_recover(&doc_path, actor, &at);
+            (at, 0u64, None, doc)
+        };
+
+        let blobs_store = blobs::open(&dir.join("blobs")).await?;
+        let blobs_protocol = BlobsProtocol::new(&blobs_store, None);
 
         // The merged-doc out-channel is unused today (the receiver is dropped); a sync
         // round still merges into the shared `doc` directly. Kept for a future
@@ -201,9 +227,6 @@ impl SpaceState {
         let (merged_tx, _merged_rx) = mpsc::channel::<automerge::Automerge>(16);
         let sync = MeshSync::with_shared(doc.clone(), group_key, id, merged_tx);
 
-        // Enforced iff a verified membership log is present (created via
-        // `create_space_with_roles` / `join_space_with_roles`).
-        let membership = Membership::open(id, dir.join("members.log"))?.map(StdMutex::new);
         let sigs = SigStore::load(dir.join("sigs.bin"));
 
         Ok(SpaceState {
@@ -211,13 +234,15 @@ impl SpaceState {
             name,
             doc_path,
             group_key,
-            atrest_key,
+            atrest_key: StdMutex::new(atrest_key),
+            atrest_epoch: StdMutex::new(atrest_epoch),
+            epoch_store,
             doc,
             sync,
-            store,
+            store: blobs_store,
             blobs_protocol,
             secret_bytes,
-            membership,
+            membership: membership.map(StdMutex::new),
             sigs: StdMutex::new(sigs),
             signed_heads: Mutex::new(Vec::new()),
             kept_tags: Mutex::new(Vec::new()),
@@ -296,15 +321,42 @@ impl SpaceState {
             .collect()
     }
 
-    /// Serialize this Space's membership log (to seed another device).
-    pub(crate) fn membership_blob(&self) -> Option<Vec<u8>> {
-        self.membership
+    /// A bundle that seeds a new device with this Space's membership AND its current
+    /// epoch keys: `[u32 mem_len][membership log][epoch keys]`. The epoch keys are needed
+    /// so the joiner can derive its at-rest key (and verify future rotations). Parsed by
+    /// [`SpaceState::install_join_bundle`].
+    pub(crate) fn join_bundle(&self) -> Option<Vec<u8>> {
+        let m = self.membership.as_ref()?;
+        let mem = m.lock().expect("membership lock").serialize();
+        let epochs = self
+            .epoch_store
             .as_ref()
-            .map(|m| m.lock().expect("membership lock").serialize())
+            .map(|s| s.lock().expect("epoch lock").serialize())
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(4 + mem.len() + epochs.len());
+        out.extend_from_slice(&(mem.len() as u32).to_le_bytes());
+        out.extend_from_slice(&mem);
+        out.extend_from_slice(&epochs);
+        Some(out)
+    }
+
+    /// Split a join bundle into `(membership log bytes, epoch-keys bytes)` for the joiner
+    /// to write before opening the Space.
+    pub(crate) fn split_join_bundle(bundle: &[u8]) -> Option<(&[u8], &[u8])> {
+        if bundle.len() < 4 {
+            return None;
+        }
+        let mut len = [0u8; 4];
+        len.copy_from_slice(&bundle[0..4]);
+        let mem_len = u32::from_le_bytes(len) as usize;
+        let mem = bundle.get(4..4 + mem_len)?;
+        let epochs = &bundle[4 + mem_len..];
+        Some((mem, epochs))
     }
 
     /// Append an Admin-signed membership op (add / set-role / remove). Errors if this
-    /// Space is permissive or this device is not an Admin.
+    /// Space is permissive or this device is not an Admin. Removal's epoch rekey is driven
+    /// by the caller ([`Mesh::remove_member`]) via [`SpaceState::rotate_epoch`].
     pub(crate) fn membership_op(&self, op: MemberOp) -> Result<()> {
         let Some(m) = &self.membership else {
             return Err(CoreError::Other(anyhow::anyhow!(
@@ -318,6 +370,133 @@ impl SpaceState {
             MemberOp::SetRole(ep, role) => guard.set_role(&secret, ep, role),
             MemberOp::Remove(ep) => guard.remove_member(&secret, ep),
         }
+    }
+
+    /// The current epoch (from the membership log; 0 for permissive Spaces).
+    pub(crate) fn current_epoch(&self) -> u64 {
+        self.membership
+            .as_ref()
+            .map(|m| m.lock().expect("membership lock").state().epoch())
+            .unwrap_or(0)
+    }
+
+    /// The highest epoch for which we actually hold a key (≤ `current_epoch`).
+    pub(crate) fn held_epoch(&self) -> u64 {
+        self.epoch_store
+            .as_ref()
+            .and_then(|s| s.lock().expect("epoch lock").max_epoch())
+            .unwrap_or(0)
+    }
+
+    /// Mint epoch 0's key at genesis (creator side), signed by this device (the root
+    /// Admin), and persist it. Idempotent.
+    pub(crate) fn seed_genesis_epoch(&self) -> Result<()> {
+        let Some(store) = &self.epoch_store else {
+            return Ok(());
+        };
+        let mut guard = store.lock().expect("epoch lock");
+        if guard.has(0) {
+            return Ok(());
+        }
+        let secret = self.secret();
+        let key = keys::generate();
+        let ek = epoch::mint(&self.id, 0, key, &secret);
+        guard.put(0, ek);
+        drop(guard);
+        // Key the at-rest under epoch 0 now that we have its key.
+        let at = epoch::derive_atrest(&key, &self.id, 0);
+        *self.atrest_key.lock().expect("atrest lock") = at;
+        *self.atrest_epoch.lock().expect("atrest epoch lock") = 0;
+        Ok(())
+    }
+
+    /// Rotate to a fresh, Admin-signed epoch key (revocation substrate). Bumps the
+    /// membership epoch, mints + persists the new key, re-keys the at-rest snapshot, and
+    /// re-saves it under the new epoch. Admin-only.
+    pub(crate) async fn rotate_epoch(&self) -> Result<()> {
+        let (Some(m), Some(store)) = (&self.membership, &self.epoch_store) else {
+            return Err(CoreError::Other(anyhow::anyhow!(
+                "this Space does not enforce roles"
+            )));
+        };
+        let secret = self.secret();
+        let new_epoch = {
+            let mut guard = m.lock().expect("membership lock");
+            if !guard.state().is_admin(&self.my_endpoint()) {
+                return Err(CoreError::Other(anyhow::anyhow!(
+                    "only an Admin can rotate the epoch key"
+                )));
+            }
+            let next = guard.state().epoch() + 1;
+            guard.record_key_rotation(&secret, next)?;
+            next
+        };
+        let key = keys::generate();
+        let ek = epoch::mint(&self.id, new_epoch, key, &secret);
+        store.lock().expect("epoch lock").put(new_epoch, ek);
+        let at = epoch::derive_atrest(&key, &self.id, new_epoch);
+        *self.atrest_key.lock().expect("atrest lock") = at;
+        *self.atrest_epoch.lock().expect("atrest epoch lock") = new_epoch;
+        self.save().await?;
+        Ok(())
+    }
+
+    /// Serialize the epoch keys we hold (to push to a peer in a verified exchange).
+    fn serialize_epoch_keys(&self) -> Vec<u8> {
+        self.epoch_store
+            .as_ref()
+            .map(|s| s.lock().expect("epoch lock").serialize())
+            .unwrap_or_default()
+    }
+
+    /// Adopt a peer's pushed epoch keys: take only those we lack whose signature verifies
+    /// AND whose signer is an Admin in the (already-merged) membership log. If our held
+    /// epoch advances, re-key at-rest and re-save under the new epoch. Returns whether we
+    /// advanced.
+    async fn adopt_epoch_keys(&self, bytes: &[u8]) -> Result<bool> {
+        let (Some(store), Some(m)) = (&self.epoch_store, &self.membership) else {
+            return Ok(false);
+        };
+        let before = self.held_epoch();
+        for (epoch_n, ek) in epoch::parse_keys(bytes) {
+            {
+                let guard = store.lock().expect("epoch lock");
+                if guard.has(epoch_n) {
+                    continue;
+                }
+            }
+            if !epoch::verify(&self.id, epoch_n, &ek) {
+                continue;
+            }
+            let signer_is_admin = m
+                .lock()
+                .expect("membership lock")
+                .state()
+                .is_admin(&ek.admin);
+            if !signer_is_admin {
+                continue;
+            }
+            store.lock().expect("epoch lock").put(epoch_n, ek);
+        }
+        let after = self.held_epoch();
+        if after > before {
+            if let Some(ek) = store.lock().expect("epoch lock").get(after) {
+                let at = epoch::derive_atrest(&ek.key, &self.id, after);
+                *self.atrest_key.lock().expect("atrest lock") = at;
+                *self.atrest_epoch.lock().expect("atrest epoch lock") = after;
+            }
+            self.save().await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// The membership/audit log as human-readable entries (enforced Spaces only).
+    pub(crate) fn audit_log(&self) -> Vec<crate::membership::AuditEntry> {
+        self.membership
+            .as_ref()
+            .map(|m| m.lock().expect("membership lock").audit())
+            .unwrap_or_default()
     }
 
     pub(crate) fn id(&self) -> SpaceId {
@@ -432,10 +611,20 @@ impl SpaceState {
         Ok(hash)
     }
 
-    /// Persist this Space's replica (compacted, encrypted at rest, crash-safe).
+    /// Persist this Space's replica (compacted, encrypted at rest, crash-safe). Enforced
+    /// Spaces prepend an 8-byte epoch header (the epoch the at-rest key is derived from);
+    /// permissive Spaces write the bare AEAD blob (unchanged from M1).
     pub(crate) async fn save(&self) -> Result<()> {
         let plain = doc::save(&self.doc).await;
-        let bytes = atrest::encrypt(&self.atrest_key, &plain);
+        let at = *self.atrest_key.lock().expect("atrest lock");
+        let bytes = if self.epoch_store.is_some() {
+            let epoch = *self.atrest_epoch.lock().expect("atrest epoch lock");
+            let mut out = epoch.to_le_bytes().to_vec();
+            out.extend_from_slice(&atrest::encrypt(&at, &plain));
+            out
+        } else {
+            atrest::encrypt(&at, &plain)
+        };
         let path = self.doc_path.clone();
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             use std::io::Write;
@@ -548,10 +737,23 @@ impl SpaceState {
         self.sign_local_changes().await;
 
         // 1. Membership log: swap + merge so both agree on roles before judging changes.
-        let our_mem = self.membership_blob().unwrap_or_default();
+        let our_mem = self
+            .membership
+            .as_ref()
+            .map(|m| m.lock().expect("membership lock").serialize())
+            .unwrap_or_default();
         write_frame(send, &our_mem).await?;
         let their_mem = read_frame(recv).await?;
         self.merge_membership_bytes(&their_mem)?;
+
+        // 1b. Epoch keys: swap + adopt the Admin-signed keys the peer has that we lack, so
+        // a remaining member converges onto a post-revocation epoch key. Done after the
+        // membership merge so we can check the signer is a current Admin. The removed
+        // device never reaches here — it fails the gate before the exchange.
+        let our_epochs = self.serialize_epoch_keys();
+        write_frame(send, &our_epochs).await?;
+        let their_epochs = read_frame(recv).await?;
+        self.adopt_epoch_keys(&their_epochs).await?;
 
         // 2. Heads.
         let our_heads = { self.doc.lock().await.get_heads() };
@@ -890,4 +1092,30 @@ fn move_aside_and_fresh(path: &Path, actor: ActorId) -> SharedDoc {
     let aside = path.with_extension(format!("automerge.corrupt.{}", std::process::id()));
     let _ = std::fs::rename(path, &aside);
     doc::open(actor)
+}
+
+/// Load an enforced Space's snapshot: `[epoch(8) || AEAD]`. The epoch header names the
+/// epoch key the at-rest key was derived from; if we don't hold that epoch key yet (or
+/// the blob is corrupt/torn) we recover fresh and re-converge from peers.
+fn load_enforced(path: &Path, actor: ActorId, store: &EpochStore, id: &SpaceId) -> SharedDoc {
+    match std::fs::read(path) {
+        Ok(bytes) if bytes.len() >= 8 => {
+            let mut e = [0u8; 8];
+            e.copy_from_slice(&bytes[0..8]);
+            let snap_epoch = u64::from_le_bytes(e);
+            match store.get(snap_epoch) {
+                Some(ek) => {
+                    let at = epoch::derive_atrest(&ek.key, id, snap_epoch);
+                    match atrest::decrypt(&at, &bytes[8..]) {
+                        Some(plain) => doc::load(&plain, actor.clone())
+                            .unwrap_or_else(|_| move_aside_and_fresh(path, actor)),
+                        None => move_aside_and_fresh(path, actor),
+                    }
+                }
+                None => move_aside_and_fresh(path, actor),
+            }
+        }
+        Ok(bytes) if !bytes.is_empty() => move_aside_and_fresh(path, actor),
+        _ => doc::open(actor),
+    }
 }

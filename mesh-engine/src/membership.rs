@@ -550,6 +550,56 @@ impl Membership {
         Ok(true)
     }
 
+    /// The verified log as a human-readable audit trail (oldest first). Because `open`/
+    /// `merge` only ever keep a chain that replays cleanly, every entry returned here has
+    /// passed signature + hash-chain + authorization checks — a tampered log fails to
+    /// load rather than producing entries.
+    pub fn audit(&self) -> Vec<AuditEntry> {
+        let ep = |e: &[u8; 32]| {
+            PublicKey::from_bytes(e)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|_| "?".to_string())
+        };
+        self.entries
+            .iter()
+            .map(|e| {
+                let (action, target) = match &e.kind {
+                    OpKind::Genesis { founder, .. } => {
+                        ("space-created".to_string(), Some(ep(founder)))
+                    }
+                    OpKind::AddMember { endpoint, role } => (
+                        format!(
+                            "member-added:{}",
+                            Role::from_byte(*role).map(Role::as_str).unwrap_or("?")
+                        ),
+                        Some(ep(endpoint)),
+                    ),
+                    OpKind::SetRole { endpoint, role } => (
+                        format!(
+                            "role-changed:{}",
+                            Role::from_byte(*role).map(Role::as_str).unwrap_or("?")
+                        ),
+                        Some(ep(endpoint)),
+                    ),
+                    OpKind::RemoveMember { endpoint } => {
+                        ("member-removed".to_string(), Some(ep(endpoint)))
+                    }
+                    OpKind::KeyRotated { epoch } => (format!("key-rotated:{epoch}"), None),
+                    OpKind::PairingCompleted { endpoint } => {
+                        ("pairing-completed".to_string(), Some(ep(endpoint)))
+                    }
+                };
+                AuditEntry {
+                    seq: e.seq,
+                    epoch: e.epoch,
+                    signer: ep(&e.signer),
+                    action,
+                    target,
+                }
+            })
+            .collect()
+    }
+
     fn persist(&self) -> Result<()> {
         let bytes = self.serialize();
         let tmp = self.path.with_extension("log.tmp");
@@ -557,6 +607,22 @@ impl Membership {
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
+}
+
+/// One human-readable line of a Space's audit log (a verified membership-log entry).
+#[derive(Debug, Clone)]
+pub struct AuditEntry {
+    /// Position in the chain (0 = genesis).
+    pub seq: u64,
+    /// The key epoch in effect when this entry was appended.
+    pub epoch: u64,
+    /// Endpoint id (string) of the Admin that signed this entry.
+    pub signer: String,
+    /// What happened: `space-created`, `member-added:<role>`, `role-changed:<role>`,
+    /// `member-removed`, `key-rotated:<epoch>`, `pairing-completed`.
+    pub action: String,
+    /// The endpoint id this entry acted on, when applicable.
+    pub target: Option<String>,
 }
 
 /// Sign an entry in place over `domain || space || unsigned`.

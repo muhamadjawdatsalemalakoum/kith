@@ -48,12 +48,23 @@ Current limitations:
 - **Concurrent membership edits** are reconciled by longest-valid-chain, not a full
   group-key-agreement (CGKA) merge; Admin actions should be serialized. Full
   forward-secret group agreement over unreliable P2P is out of scope.
-- **Revocation:** removing a member updates the signed log so honest peers refuse the
-  removed device at connect, and the legacy "Reset & re-key" rotates the group key. The
-  **epoch rekey** that re-keys the remaining members and re-encrypts at rest (so a
-  removed device is locked out of *future* data) is in progress (engine v2 M3). There is
-  **no forward secrecy** for data a device already synced before removal, and no
-  retroactive wipe.
+- **Revocation = epoch rekey → post-removal confidentiality for *future* data.** Removing
+  a member appends a signed removal to the log (so honest peers refuse the device at the
+  connect gate) **and** rotates the Space's epoch key: a fresh, Admin-signed key is minted,
+  distributed to the remaining members over the authenticated, membership-gated channel
+  (the removed device fails the gate and never receives it), and the at-rest snapshot is
+  re-encrypted under the new epoch (`revoked_device_cannot_sync_new_epoch`,
+  `remaining_members_get_new_key_and_converge`, `at_rest_reencrypted_under_new_epoch`).
+  This is **not** forward secrecy and **not** a retroactive wipe: a removed device keeps
+  whatever it already synced, and the guarantee is post-removal confidentiality of future
+  data in the honest-peer model. (The legacy default-Space "Reset & re-key" still rotates
+  the group key for single-group installs.)
+- **Audit log.** Each role-enforced Space's signed, hash-chained membership log doubles as
+  a tamper-evident audit log (space-created, member added/removed/role-changed, key
+  rotations, pairings). Because a tampered log fails to replay, it cannot be silently
+  altered (`audit_log_hash_chain_detects_tampering`). Honest limit: it covers
+  membership/admin actions, not every local read, and a peer can still withhold its own
+  local view.
 - `spake2 0.4` is unaudited and not constant-time; pairing depends on it (mitigated by
   the mandatory confirmation round, but it's a residual risk).
 - Real-network NAT traversal and live DHT/relay behavior are checked by hand rather

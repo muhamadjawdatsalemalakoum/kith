@@ -197,16 +197,34 @@ yields the `Admin`/`Writer`/`Reader` map.
   Role-enforced Spaces use a verified sync protocol (signed change push + apply barrier)
   in place of plain Automerge bloom-sync; permissive/default Spaces are unchanged.
 - **API:** `add_member` / `set_member_role` / `remove_member` / `members` / `my_role` /
-  `space_membership_blob` / `join_space_with_roles`; blob serving gated to Writer/Admin.
+  `space_join_bundle` / `join_space_with_roles`; blob serving gated to Writer/Admin.
 - **Tests:** `reader_write_rejected`, `non_member_endpointid_rejected_even_with_group_key`,
   `admin_can_add_and_promote`, `membership_change_requires_admin`,
   `writer_can_write_reader_cannot_share_blob`, plus the `membership` unit tests
   (genesis/replay, forged-entry rejection, tamper detection, merge).
 
-### EV2-M3 — Revocation, key epochs & audit log · ⬜
-Epoch rekey on device removal (post-removal confidentiality for future data — **not**
-forward secrecy for already-synced data), re-encrypt at rest under the new epoch, and a
-hash-chained per-Space audit log.
+### EV2-M3 — Revocation, key epochs & audit log · ✅ DONE
+Removing a device now revokes it: the signed log records the removal (honest peers refuse
+it at the gate) **and** the Space's **epoch key rotates**.
+- **Epoch keys** (`epoch.rs`): a per-Space, monotonically-increasing, **Admin-signed**
+  key, minted at genesis (epoch 0) and on every rotation. Stored in `epochs.bin`; seeded
+  to joiners in the `space_join_bundle`. A peer adopts a pushed epoch key only if its
+  signature verifies *and* the signer is a current Admin — so a non-Admin can't forge one.
+- **Distribution** rides the authenticated, membership-gated verified-sync channel: the
+  ahead peer pushes the keys the other lacks; the removed device fails the gate and never
+  receives them. Remaining members converge on the new epoch and re-key.
+- **At-rest re-encryption:** enforced Spaces derive the snapshot key from the current
+  epoch key (`derive_atrest`) and prepend an 8-byte epoch header; a rotation re-encrypts
+  under the new epoch, and a restart re-derives it to reload.
+- **Honest guarantee:** post-removal confidentiality for *future* data in the honest-peer
+  model — **not** forward secrecy for already-synced data and **not** a retroactive wipe.
+- **Audit log:** the signed, hash-chained membership log is the per-Space audit log
+  (space-created / member-added / role-changed / removed / key-rotated / pairing); a
+  tampered log fails to replay. API: `remove_member` (async; rotates), `rotate_epoch`,
+  `space_epoch`, `audit_log`.
+- **Tests:** `revoked_device_cannot_sync_new_epoch`,
+  `remaining_members_get_new_key_and_converge`, `at_rest_reencrypted_under_new_epoch`,
+  `audit_log_hash_chain_detects_tampering`.
 
 > Later (not in the current substrate pass): `files.read` (EV2-M4), self-hosted relay
 > (EV2-M5), MCP per-Space binding (EV2-M6), keychain + encrypted export/recovery

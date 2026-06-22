@@ -1,4 +1,4 @@
-//! Engine: per-device identity, membership & roles (role-enforced Spaces).
+﻿//! Engine: per-device identity, membership & roles (role-enforced Spaces).
 //!
 //! Membership is rooted in EndpointId (a signed, founder-bound log), not mere
 //! possession of the group key, and `Admin`/`Writer`/`Reader` are enforced
@@ -44,7 +44,7 @@ async fn reader_write_rejected() {
     let sid = a.create_space_with_roles("team").await.unwrap();
     let key = a.group_key_of(sid).unwrap();
     a.add_member(sid, &b.endpoint_id(), Role::Reader).unwrap();
-    let blob = a.space_membership_blob(sid).unwrap();
+    let blob = a.space_join_bundle(sid).unwrap();
     b.join_space_with_roles(sid, key, &blob, "team")
         .await
         .unwrap();
@@ -53,7 +53,7 @@ async fn reader_write_rejected() {
     let a_s = a.space(sid).unwrap();
     let b_s = b.space(sid).unwrap();
 
-    // The Admin writes — the Reader receives it (read access works).
+    // The Admin writes â€” the Reader receives it (read access works).
     put_probe(&a_s.doc(), "from-admin").await;
     a_s.sync_with(b.endpoint_addr()).await.unwrap();
     assert_eq!(
@@ -62,7 +62,7 @@ async fn reader_write_rejected() {
         "a Reader still receives an authorized write"
     );
 
-    // The Reader writes and syncs — the honest Admin peer must NOT apply it.
+    // The Reader writes and syncs â€” the honest Admin peer must NOT apply it.
     put_probe(&b_s.doc(), "from-reader").await;
     b_s.sync_with(a.endpoint_addr()).await.unwrap();
     assert_eq!(
@@ -85,11 +85,11 @@ async fn non_member_endpointid_rejected_even_with_group_key() {
 
     let sid = a.create_space_with_roles("team").await.unwrap();
     let key = a.group_key_of(sid).unwrap();
-    let blob = a.space_membership_blob(sid).unwrap(); // genesis only — stranger isn't added
+    let blob = a.space_join_bundle(sid).unwrap(); // genesis only â€” stranger isn't added
     put_probe(&a.space(sid).unwrap().doc(), "secret").await;
 
     // The stranger has the group key AND the verifiable genesis, but was never added by
-    // the Admin — so it is not a member.
+    // the Admin â€” so it is not a member.
     let stranger = local_mesh(ds.path()).await;
     stranger
         .join_space_with_roles(sid, key, &blob, "team")
@@ -125,7 +125,7 @@ async fn admin_can_add_and_promote() {
     let sid = a.create_space_with_roles("team").await.unwrap();
     let key = a.group_key_of(sid).unwrap();
     a.add_member(sid, &b.endpoint_id(), Role::Reader).unwrap();
-    let blob = a.space_membership_blob(sid).unwrap();
+    let blob = a.space_join_bundle(sid).unwrap();
     b.join_space_with_roles(sid, key, &blob, "team")
         .await
         .unwrap();
@@ -170,7 +170,7 @@ async fn membership_change_requires_admin() {
     let sid = a.create_space_with_roles("team").await.unwrap();
     let key = a.group_key_of(sid).unwrap();
     a.add_member(sid, &b.endpoint_id(), Role::Reader).unwrap();
-    let blob = a.space_membership_blob(sid).unwrap();
+    let blob = a.space_join_bundle(sid).unwrap();
     b.join_space_with_roles(sid, key, &blob, "team")
         .await
         .unwrap();
@@ -185,8 +185,8 @@ async fn membership_change_requires_admin() {
             .is_err(),
         "a non-Admin cannot promote itself"
     );
-    // (The wire-level defence — a forged log entry signed by a non-Admin being rejected
-    // on replay — is covered by the `membership` unit tests.)
+    // (The wire-level defence â€” a forged log entry signed by a non-Admin being rejected
+    // on replay â€” is covered by the `membership` unit tests.)
 
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
@@ -205,7 +205,7 @@ async fn writer_can_write_reader_cannot_share_blob() {
     let sid = a.create_space_with_roles("team").await.unwrap();
     let key = a.group_key_of(sid).unwrap();
     a.add_member(sid, &b.endpoint_id(), Role::Reader).unwrap();
-    let blob = a.space_membership_blob(sid).unwrap();
+    let blob = a.space_join_bundle(sid).unwrap();
     b.join_space_with_roles(sid, key, &blob, "team")
         .await
         .unwrap();

@@ -31,6 +31,7 @@ mod blobs;
 mod config;
 mod doc;
 mod endpoint;
+mod epoch;
 mod error;
 mod identity;
 mod keys;
@@ -62,7 +63,7 @@ pub use iroh_blobs::Hash;
 pub use config::{CoreConfig, Infra};
 pub use doc::SharedDoc;
 pub use error::{CoreError, Result};
-pub use membership::Role;
+pub use membership::{AuditEntry, Role};
 pub use space::{SpaceId, SpaceInfo};
 pub use sync::MeshSync;
 
@@ -386,39 +387,43 @@ impl Mesh {
             None,
         )
         .await?;
+        // Mint epoch 0's Admin-signed key (the revocation substrate + at-rest key).
+        state.seed_genesis_epoch()?;
         self.inner.registry.insert(state);
         self.inner.changed.notify_waiters();
         Ok(id)
     }
 
-    /// Serialize a Space's membership log, to seed another device joining with roles
-    /// (hand it alongside the group key, e.g. during pairing).
-    pub fn space_membership_blob(&self, id: SpaceId) -> Option<Vec<u8>> {
-        self.inner
-            .registry
-            .get(&id)
-            .and_then(|s| s.membership_blob())
+    /// A bundle that seeds another device joining with roles: the verified membership log
+    /// PLUS the Space's current epoch keys (so the joiner can derive its at-rest key and
+    /// verify future rotations). Hand it alongside the group key, e.g. during pairing.
+    pub fn space_join_bundle(&self, id: SpaceId) -> Option<Vec<u8>> {
+        self.inner.registry.get(&id).and_then(|s| s.join_bundle())
     }
 
-    /// Join a role-enforced Space you've been added to: persist its key + the verified
-    /// membership log (which roots trust in the founder Admin), then register it.
+    /// Join a role-enforced Space you've been added to: persist its key, the verified
+    /// membership log (which roots trust in the founder Admin), and the current epoch
+    /// keys, then register it.
     pub async fn join_space_with_roles(
         &self,
         id: SpaceId,
         group_key: [u8; 32],
-        membership_blob: &[u8],
+        join_bundle: &[u8],
         name: &str,
     ) -> Result<()> {
         if self.inner.registry.contains(&id) {
             return Ok(());
         }
+        let (mem, epochs) = SpaceState::split_join_bundle(join_bundle)
+            .ok_or_else(|| CoreError::Other(anyhow::anyhow!("malformed join bundle")))?;
         let dir = self.space_dir(id);
         std::fs::create_dir_all(&dir)?;
         keys::write_key(&dir.join("group.key"), &group_key)?;
         let _ = space::write_name(&dir, name);
         let tmp = dir.join("members.log.tmp");
-        std::fs::write(&tmp, membership_blob)?;
+        std::fs::write(&tmp, mem)?;
         std::fs::rename(&tmp, dir.join("members.log"))?;
+        std::fs::write(dir.join("epochs.bin"), epochs)?;
         // SpaceState::open replays + verifies the seeded log; a forged/mismatched log
         // (not bound to this SpaceId) fails here rather than being trusted.
         let state = SpaceState::open(
@@ -448,11 +453,43 @@ impl Mesh {
             .membership_op(MemberOp::SetRole(ep, role))
     }
 
-    /// Remove a device from a role-enforced Space (Admin only). Full revocation
-    /// (epoch rekey so the removed device loses access to future data) is M3.
-    pub fn remove_member(&self, id: SpaceId, endpoint: &str) -> Result<()> {
+    /// Remove a device from a role-enforced Space (Admin only). This revokes it: the
+    /// signed log records the removal (so honest peers refuse it at the gate) AND the
+    /// epoch key is rotated, so remaining members re-key future at-rest data under a key
+    /// the removed device can't obtain. Post-removal confidentiality for *future* data —
+    /// not a retroactive wipe (see `SECURITY.md`).
+    pub async fn remove_member(&self, id: SpaceId, endpoint: &str) -> Result<()> {
         let ep = endpoint_bytes(endpoint)?;
-        self.space_state(id)?.membership_op(MemberOp::Remove(ep))
+        let state = self.space_state(id)?;
+        state.membership_op(MemberOp::Remove(ep))?;
+        state.rotate_epoch().await?;
+        Ok(())
+    }
+
+    /// Proactively rotate a role-enforced Space's epoch key (Admin only) without removing
+    /// anyone — e.g. periodic rekeying. Remaining members converge on the new key.
+    pub async fn rotate_epoch(&self, id: SpaceId) -> Result<()> {
+        self.space_state(id)?.rotate_epoch().await
+    }
+
+    /// The current key epoch of a role-enforced Space (0 for a permissive Space).
+    pub fn space_epoch(&self, id: SpaceId) -> u64 {
+        self.inner
+            .registry
+            .get(&id)
+            .map(|s| s.current_epoch())
+            .unwrap_or(0)
+    }
+
+    /// The tamper-evident audit log of a role-enforced Space (space-created, members
+    /// added/removed/role-changed, key rotations, pairings), oldest first. Empty for a
+    /// permissive Space. A tampered log fails to load, so every entry here is verified.
+    pub fn audit_log(&self, id: SpaceId) -> Vec<AuditEntry> {
+        self.inner
+            .registry
+            .get(&id)
+            .map(|s| s.audit_log())
+            .unwrap_or_default()
     }
 
     /// Current members of a role-enforced Space as `(endpoint-id, role)` (empty for a
