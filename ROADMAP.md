@@ -246,9 +246,18 @@ so a prompt-injected agent is structurally unable to cross Spaces. Tests:
 `mcp_server_bound_to_one_space`, `mcp_has_no_cross_space_argument`,
 `agent_writes_land_only_in_bound_space`.
 
-> Later (not yet in this pass): self-hosted relay (EV2-M5), keychain + encrypted
-> export/recovery (EV2-M7), multi-stream throughput + a measured benchmark (EV2-M8), and
-> wiring every capability through the desktop GUI (EV2-M10).
+### EV2-M5 — Self-hosted relay / discovery · ✅ DONE
+`Infra::SelfHosted { relay_url, relay_token, pkarr_relay, origin_domain }` (+
+`CoreConfig::self_hosted(..)`): a custom `RelayMap` built from your relay URL (optionally
+auth-locked with a shared token), your own pkarr publisher, and your own DNS lookup — no
+n0 infra. Deploy configs (iroh-relay + iroh-dns-server, Docker) and a step-by-step guide
+live in `infra/`. Tests: `selfhosted_endpoint_builds_and_syncs` (two peers converge over a
+self-hosted relay; under `test-utils` the arm trusts the in-process relay so it runs offline)
++ the existing `state_syncs_over_relay`.
+
+> Later (not yet in this pass): keychain + encrypted export/recovery (EV2-M7),
+> multi-stream throughput + a measured benchmark (EV2-M8), and wiring every capability
+> through the desktop GUI (EV2-M10).
 
 ---
 

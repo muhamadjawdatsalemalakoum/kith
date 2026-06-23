@@ -49,3 +49,44 @@ async fn state_syncs_over_relay() {
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 }
+
+/// The `Infra::SelfHosted` path builds an endpoint from a relay URL (+ optional token) and
+/// pkarr/DNS wiring, and two such peers converge over that self-hosted relay. The relay is
+/// the in-process test relay (so this runs offline); under `test-utils` the SelfHosted arm
+/// trusts its cert and forces the relay path, exercising the real self-hosted code end to
+/// end. (pkarr/DNS discovery needs real servers; peers dial by address here.)
+#[tokio::test(flavor = "multi_thread")]
+async fn selfhosted_endpoint_builds_and_syncs() {
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+
+    let (_relay_map, url, _relay) = iroh::test_utils::run_relay_server().await.unwrap();
+
+    let cfg = |dir: &std::path::Path| CoreConfig {
+        data_dir: dir.to_path_buf(),
+        infra: Infra::SelfHosted {
+            relay_url: url.to_string(),
+            relay_token: String::new(), // open in-process test relay
+            pkarr_relay: "https://localhost/pkarr".to_string(),
+            origin_domain: "kith.invalid".to_string(),
+        },
+        group_key: Some([6u8; 32]),
+        enable_blobs: false,
+    };
+
+    let a = Mesh::start(cfg(da.path())).await.unwrap();
+    let b = Mesh::start(cfg(db.path())).await.unwrap();
+    a.online().await;
+    b.online().await;
+
+    put_probe(&a, "via-selfhosted").await;
+    a.sync_with(b.endpoint_addr()).await.unwrap();
+    assert_eq!(
+        get_probe(&b).await.as_deref(),
+        Some("via-selfhosted"),
+        "state converged over a self-hosted relay"
+    );
+
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+}

@@ -66,6 +66,52 @@ pub async fn build(secret_key: SecretKey, infra: &Infra, enable_blobs: bool) -> 
                 .context("bind endpoint (local only)")?
         }
 
+        // SELF-HOSTED: your own relay (a custom RelayMap built from the URL, optionally
+        // auth-locked with a shared token) + your own pkarr publish + DNS lookup. No n0
+        // infra. The relay transport here is the same `RelayMode::Custom` path the
+        // relay-path test exercises; this arm adds the URL→RelayMap + pkarr/DNS wiring.
+        Infra::SelfHosted {
+            relay_url,
+            relay_token,
+            pkarr_relay,
+            origin_domain,
+        } => {
+            use iroh::address_lookup::{dns::DnsAddressLookup, pkarr::PkarrPublisher};
+            use iroh::endpoint::RelayMode;
+            use iroh::{RelayConfig, RelayMap, RelayUrl};
+
+            let relay: RelayUrl = relay_url.parse().context("parse relay url")?;
+            // An empty token means a no-auth/open relay; otherwise lock to the shared token.
+            let mut cfg = RelayConfig::from(relay);
+            if !relay_token.is_empty() {
+                cfg = cfg.with_auth_token(relay_token.clone());
+            }
+            let relay_map = RelayMap::from_iter([cfg]);
+            let pkarr: url::Url = pkarr_relay.parse().context("parse pkarr relay url")?;
+
+            #[allow(unused_mut)]
+            let mut builder = Endpoint::builder(presets::Minimal)
+                .secret_key(secret_key)
+                .alpns(alpns)
+                .relay_mode(RelayMode::Custom(relay_map))
+                .address_lookup(PkarrPublisher::builder(pkarr))
+                .address_lookup(DnsAddressLookup::builder(origin_domain.clone()));
+            // Under the `test-utils` feature ONLY, trust the in-process relay's self-signed
+            // cert and force the relay path (strip direct IP) so a single-machine test can
+            // exercise this exact self-hosted code path end to end. Never in shipped builds.
+            #[cfg(feature = "test-utils")]
+            {
+                use iroh::tls::CaTlsConfig;
+                builder = builder
+                    .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+                    .clear_ip_transports();
+            }
+            builder
+                .bind()
+                .await
+                .context("bind endpoint (self-hosted)")?
+        }
+
         // TEST-ONLY: relay-only against an in-process relay. Add the custom relay
         // transport, trust its self-signed test cert, and strip every direct IP
         // transport — so the only path to a peer is through the relay.

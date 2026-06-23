@@ -58,6 +58,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 data-encoding = "2"
+# URL parsing for the self-hosted pkarr publish endpoint (Infra::SelfHosted).
+url = "2"
 # Stable per-entry ids for memory entries (random v4 — id-based forget).
 uuid = { version = "1", features = ["v4"] }
 
