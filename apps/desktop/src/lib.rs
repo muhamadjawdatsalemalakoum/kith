@@ -17,7 +17,7 @@ use std::time::Duration;
 use agent_memory::{Entry, Memory};
 use centraltabs::{Tab, Tabs};
 use kith_files::Files;
-use mesh_engine::{endpoint_addr_from_id, CoreConfig, Mesh, SpaceId};
+use mesh_engine::{endpoint_addr_from_id, CoreConfig, Mesh, Role, SpaceId};
 use mesh_mcp::McpApp;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -729,13 +729,9 @@ async fn join_link(
     if let Some(old) = guard.take() {
         let _ = old.shutdown().await;
     }
-    let new = Mesh::start(
-        CoreConfig::serverless(&state.data_dir)
-            .with_blobs(true)
-            .with_keychain(true),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let new = Mesh::start(effective_core_config(&state.data_dir))
+        .await
+        .map_err(|e| e.to_string())?;
 
     let dev = Device {
         id: host_id.clone(),
@@ -810,13 +806,9 @@ async fn leave_group(state: State<'_, AppState>) -> Result<(), String> {
     if let Some(old) = guard.take() {
         let _ = old.shutdown().await;
     }
-    let new = Mesh::start(
-        CoreConfig::serverless(&state.data_dir)
-            .with_blobs(true)
-            .with_keychain(true),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let new = Mesh::start(effective_core_config(&state.data_dir))
+        .await
+        .map_err(|e| e.to_string())?;
     *guard = Some(new);
     Ok(())
 }
@@ -867,15 +859,27 @@ fn open_external(url: String) {
 struct Settings {
     data_dir: String,
     download_dir: String,
+    /// How at-rest / group keys are stored, for display.
+    key_storage: String,
 }
 
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Settings {
+    // The desktop always opts into the keychain; on Windows/macOS keys live in the OS
+    // keychain, on Linux (no backend compiled) they fall back to the hardened key file.
+    let key_storage = if cfg!(target_os = "windows") {
+        "Windows Credential Manager".to_string()
+    } else if cfg!(target_os = "macos") {
+        "macOS Keychain".to_string()
+    } else {
+        "Hardened key file (no OS keychain on this platform)".to_string()
+    };
     Settings {
         data_dir: state.data_dir.to_string_lossy().into_owned(),
         download_dir: effective_download_dir(&state.data_dir)
             .to_string_lossy()
             .into_owned(),
+        key_storage,
     }
 }
 
@@ -912,6 +916,345 @@ fn list_history(state: State<'_, AppState>) -> Vec<HistoryEntry> {
 #[tauri::command]
 fn clear_history(state: State<'_, AppState>) {
     let _ = std::fs::write(state.data_dir.join("history.json"), b"[]");
+}
+
+// --------------------------------------------------------------------- Spaces
+
+/// A Space as the UI sees it.
+#[derive(Serialize)]
+struct SpaceDto {
+    id: String,
+    name: String,
+    is_default: bool,
+    is_active: bool,
+    /// Role-enforced ("team") Space vs a personal/permissive one.
+    enforced: bool,
+    /// This device's role in a team Space ("admin"/"writer"/"reader"), else null.
+    role: Option<String>,
+    epoch: u64,
+    members: u32,
+}
+
+#[derive(Serialize)]
+struct MemberDto {
+    id: String,
+    role: String,
+    is_me: bool,
+}
+
+#[derive(Serialize)]
+struct AuditDto {
+    seq: u64,
+    epoch: u64,
+    signer: String,
+    action: String,
+    target: String,
+}
+
+fn parse_space(id: &str) -> Result<SpaceId, String> {
+    SpaceId::parse(id.trim()).ok_or_else(|| "That space id isn't valid.".to_string())
+}
+
+fn role_from_str(s: &str) -> Result<Role, String> {
+    match s.trim().to_lowercase().as_str() {
+        "admin" => Ok(Role::Admin),
+        "writer" => Ok(Role::Writer),
+        "reader" => Ok(Role::Reader),
+        other => Err(format!("unknown role: {other}")),
+    }
+}
+
+fn space_dto(mesh: &Mesh, id: SpaceId) -> Option<SpaceDto> {
+    let info = mesh.list_spaces().into_iter().find(|i| i.id == id)?;
+    let role = mesh.my_role(id);
+    let members = mesh.members(id);
+    Some(SpaceDto {
+        id: id.to_string(),
+        name: info.name,
+        is_default: info.is_default,
+        is_active: id == mesh.active_space(),
+        enforced: role.is_some() || !members.is_empty(),
+        role: role.map(|r| r.as_str().to_string()),
+        epoch: mesh.space_epoch(id),
+        members: members.len() as u32,
+    })
+}
+
+#[tauri::command]
+async fn list_spaces(state: State<'_, AppState>) -> Result<Vec<SpaceDto>, String> {
+    let mesh = mesh_handle(&state).await?;
+    let active = mesh.active_space();
+    Ok(mesh
+        .list_spaces()
+        .into_iter()
+        .map(|info| {
+            let role = mesh.my_role(info.id);
+            let members = mesh.members(info.id);
+            SpaceDto {
+                is_active: info.id == active,
+                enforced: role.is_some() || !members.is_empty(),
+                role: role.map(|r| r.as_str().to_string()),
+                epoch: mesh.space_epoch(info.id),
+                members: members.len() as u32,
+                id: info.id.to_string(),
+                name: info.name,
+                is_default: info.is_default,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn switch_space(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let mesh = mesh_handle(&state).await?;
+    let sid = parse_space(&id)?;
+    if mesh.set_active_space(sid) {
+        Ok(())
+    } else {
+        Err("That space isn't on this device.".into())
+    }
+}
+
+#[tauri::command]
+async fn create_space(
+    name: String,
+    team: bool,
+    state: State<'_, AppState>,
+) -> Result<SpaceDto, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Give the space a name.".into());
+    }
+    let mesh = mesh_handle(&state).await?;
+    let id = if team {
+        mesh.create_space_with_roles(&name)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        mesh.create_space(&name).await.map_err(|e| e.to_string())?
+    };
+    space_dto(&mesh, id).ok_or_else(|| "couldn't read the new space".into())
+}
+
+#[tauri::command]
+async fn leave_space(id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    let mesh = mesh_handle(&state).await?;
+    let sid = parse_space(&id)?;
+    mesh.leave_space(sid).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn space_members(id: String, state: State<'_, AppState>) -> Result<Vec<MemberDto>, String> {
+    let mesh = mesh_handle(&state).await?;
+    let sid = parse_space(&id)?;
+    let me = mesh.endpoint_id();
+    Ok(mesh
+        .members(sid)
+        .into_iter()
+        .map(|(endpoint, role)| MemberDto {
+            is_me: endpoint == me,
+            role: role.as_str().to_string(),
+            id: endpoint,
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn space_add_member(
+    id: String,
+    endpoint: String,
+    role: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mesh = mesh_handle(&state).await?;
+    let sid = parse_space(&id)?;
+    let role = role_from_str(&role)?;
+    mesh.add_member(sid, endpoint.trim(), role)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn space_set_role(
+    id: String,
+    endpoint: String,
+    role: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mesh = mesh_handle(&state).await?;
+    let sid = parse_space(&id)?;
+    let role = role_from_str(&role)?;
+    mesh.set_member_role(sid, endpoint.trim(), role)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn space_remove_member(
+    id: String,
+    endpoint: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mesh = mesh_handle(&state).await?;
+    let sid = parse_space(&id)?;
+    mesh.remove_member(sid, endpoint.trim())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn space_audit(id: String, state: State<'_, AppState>) -> Result<Vec<AuditDto>, String> {
+    let mesh = mesh_handle(&state).await?;
+    let sid = parse_space(&id)?;
+    Ok(mesh
+        .audit_log(sid)
+        .into_iter()
+        .map(|e| AuditDto {
+            seq: e.seq,
+            epoch: e.epoch,
+            signer: e.signer,
+            action: e.action,
+            target: e.target.unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// Export a Space to an encrypted `.kithspace` bundle (passphrase-protected). Opens a save
+/// dialog; returns the chosen path, or `None` if cancelled.
+#[tauri::command]
+async fn space_export(
+    app: AppHandle,
+    id: String,
+    passphrase: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    if passphrase.trim().len() < 6 {
+        return Err("Choose a passphrase of at least 6 characters.".into());
+    }
+    let mesh = mesh_handle(&state).await?;
+    let sid = parse_space(&id)?;
+    let bundle = mesh
+        .export_space(sid, &passphrase)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Kith space", &["kithspace"])
+        .set_file_name("kith-space.kithspace")
+        .save_file(move |f| {
+            let _ = tx.send(f);
+        });
+    let Some(fp) = rx.await.map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let path = fp.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(&path, &bundle).map_err(|e| e.to_string())?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+/// Import an encrypted `.kithspace` bundle (recovery / move to this device). Opens a file
+/// dialog; returns the restored Space.
+#[tauri::command]
+async fn space_import(
+    app: AppHandle,
+    passphrase: String,
+    state: State<'_, AppState>,
+) -> Result<SpaceDto, String> {
+    let mesh = mesh_handle(&state).await?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Kith space", &["kithspace"])
+        .pick_file(move |f| {
+            let _ = tx.send(f);
+        });
+    let Some(fp) = rx.await.map_err(|e| e.to_string())? else {
+        return Err("No file chosen.".into());
+    };
+    let path = fp.into_path().map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let sid = mesh
+        .import_space(&bytes, &passphrase)
+        .await
+        .map_err(|e| e.to_string())?;
+    space_dto(&mesh, sid).ok_or_else(|| "couldn't read the imported space".into())
+}
+
+// --------------------------------------------------------------- network (infra)
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+struct NetworkSettings {
+    /// "decentralized" (default) or "self_hosted".
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    relay_url: String,
+    #[serde(default)]
+    relay_token: String,
+    #[serde(default)]
+    pkarr_relay: String,
+    #[serde(default)]
+    origin_domain: String,
+}
+
+fn load_network(dir: &Path) -> NetworkSettings {
+    std::fs::read(dir.join("network.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// The engine config from the persisted network setting, with blobs + keychain enabled.
+fn effective_core_config(data_dir: &Path) -> CoreConfig {
+    let n = load_network(data_dir);
+    let base = if n.mode == "self_hosted" && !n.relay_url.trim().is_empty() {
+        CoreConfig::self_hosted(
+            data_dir,
+            n.relay_url,
+            n.relay_token,
+            n.pkarr_relay,
+            n.origin_domain,
+        )
+    } else {
+        CoreConfig::serverless(data_dir)
+    };
+    base.with_blobs(true).with_keychain(true)
+}
+
+#[tauri::command]
+fn get_network(state: State<'_, AppState>) -> NetworkSettings {
+    let mut n = load_network(&state.data_dir);
+    if n.mode.is_empty() {
+        n.mode = "decentralized".into();
+    }
+    n
+}
+
+/// Persist a network choice and restart the engine on it. Switching to self-hosted requires
+/// a relay URL.
+#[tauri::command]
+async fn set_network(settings: NetworkSettings, state: State<'_, AppState>) -> Result<(), String> {
+    if settings.mode == "self_hosted" && settings.relay_url.trim().is_empty() {
+        return Err("Enter your relay URL (e.g. https://relay.example.org/).".into());
+    }
+    let json = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(state.data_dir.join("network.json"), json).map_err(|e| e.to_string())?;
+
+    // Restart the engine on the new infra (mirrors leave_group's swap).
+    let mut guard = state.mesh.lock().await;
+    if let Some(old) = guard.take() {
+        let _ = old.shutdown().await;
+    }
+    let new = Mesh::start(effective_core_config(&state.data_dir))
+        .await
+        .map_err(|e| e.to_string())?;
+    for d in load_devices(&state.data_dir) {
+        if let Ok(addr) = endpoint_addr_from_id(&d.id) {
+            new.add_peer(addr).await;
+        }
+    }
+    *guard = Some(new);
+    Ok(())
 }
 
 // ----------------------------------------------------------------- MCP serve mode
@@ -1096,13 +1439,7 @@ pub fn serve() {
         install_panic_logger(&data_dir);
         // Try to own the engine. If another Kith (usually the GUI) already owns the data
         // dir, the content store is locked and start fails — then we bridge to it.
-        match Mesh::start(
-            CoreConfig::serverless(&data_dir)
-                .with_blobs(true)
-                .with_keychain(true),
-        )
-        .await
-        {
+        match Mesh::start(effective_core_config(&data_dir)).await {
             Ok(mesh) => {
                 for d in load_devices(&data_dir) {
                     if let Ok(addr) = endpoint_addr_from_id(&d.id) {
@@ -1146,11 +1483,9 @@ pub fn run() {
             install_panic_logger(&data_dir);
             // One engine for the whole app, serverless by default (DHT + n0 relay).
             // Blobs enabled so files can be served to / fetched from your circle.
-            let mesh = match tauri::async_runtime::block_on(Mesh::start(
-                CoreConfig::serverless(&data_dir)
-                    .with_blobs(true)
-                    .with_keychain(true),
-            )) {
+            let mesh = match tauri::async_runtime::block_on(Mesh::start(effective_core_config(
+                &data_dir,
+            ))) {
                 Ok(m) => m,
                 Err(e) => {
                     use tauri_plugin_dialog::MessageDialogKind;
@@ -1228,7 +1563,20 @@ pub fn run() {
             get_settings,
             set_download_dir,
             list_history,
-            clear_history
+            clear_history,
+            list_spaces,
+            switch_space,
+            create_space,
+            leave_space,
+            space_members,
+            space_add_member,
+            space_set_role,
+            space_remove_member,
+            space_audit,
+            space_export,
+            space_import,
+            get_network,
+            set_network
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kith");

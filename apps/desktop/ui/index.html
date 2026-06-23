@@ -35,6 +35,9 @@
         <button class="nav-item" data-view="files" data-tip="Files" aria-label="Files">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h6l2 3h4a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/><path d="M12 11v6M9.5 13.5 12 11l2.5 2.5"/></svg>
         </button>
+        <button class="nav-item" data-view="spaces" data-tip="Spaces" aria-label="Spaces">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>
+        </button>
         <button class="nav-item" data-view="agents" data-tip="Agents (AI)" aria-label="Agents">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="11" rx="3"/><path d="M12 8V4M9 13h.01M15 13h.01M9 16h6"/><path d="M2 12v3M22 12v3"/></svg>
         </button>
@@ -146,6 +149,34 @@
         <div class="notes" id="history-list"></div>
       </section>
 
+      <!-- ----------------------------- Spaces ----------------------------- -->
+      <section class="view" id="view-spaces">
+        <div class="view-head">
+          <h1>Your spaces</h1>
+          <p class="sub">A space is a private, end-to-end-encrypted world of its own — its own memory, tabs, and files. Keep a <strong>Personal</strong> space for yourself, or make a <strong>Team</strong> space with roles for a trusted circle. The <strong>active</strong> space is the one your apps and your AI work in.</p>
+        </div>
+
+        <div class="notes" id="spaces-list"></div>
+
+        <div class="dev-cta">
+          <button class="cta-card" id="space-new">
+            <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/><path d="M12 13v8"/></svg></span>
+            <span class="t">New space</span>
+            <span class="d">Create a fresh personal or team space.</span>
+          </button>
+          <button class="cta-card" id="space-import">
+            <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span>
+            <span class="t">Import a space</span>
+            <span class="d">Restore an encrypted <span class="mono">.kithspace</span> backup.</span>
+          </button>
+        </div>
+
+        <div class="secnote" style="margin-top:var(--sp-5)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v6c0 4 3 6.5 7 9 4-2.5 7-5 7-9V6Z"/><path d="m9 12 2 2 4-4"/></svg>
+          <span>The <strong>active</strong> space is what your connected AI sees over MCP — an agent can't reach any other space. To move a space to another device (or recover one), <strong>export</strong> it to an encrypted file and import it there. There's no account: if you lose every device <em>without</em> an export, that space's data is gone.</span>
+        </div>
+      </section>
+
       <!-- ----------------------------- Agents ----------------------------- -->
       <section class="view" id="view-agents">
         <div class="view-head">
@@ -249,10 +280,23 @@
           </div>
           <div class="setting">
             <div class="set-row">
-              <div class="set-label">Data &amp; keys are stored in</div>
+              <div class="set-label">Data is stored in</div>
               <div class="set-val" id="set-datadir" title="">—</div>
             </div>
             <button class="btn-ghost sm" id="set-datadir-open">Open</button>
+          </div>
+          <div class="setting">
+            <div class="set-row">
+              <div class="set-label">Keys are kept in</div>
+              <div class="set-val" id="set-keys" title="">—</div>
+            </div>
+          </div>
+          <div class="setting">
+            <div class="set-row">
+              <div class="set-label">Network</div>
+              <div class="set-val" id="set-network" title="">—</div>
+            </div>
+            <button class="btn-ghost sm" id="set-network-change">Change…</button>
           </div>
 
           <div class="about-foot">
@@ -317,6 +361,120 @@
       <div class="sheet-actions" style="justify-content:center">
         <button class="btn-quiet" id="welcome-skip">Maybe later</button>
         <button class="btn" id="welcome-link">Link a device</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create a space -->
+  <div class="scrim hidden" id="space-create-modal">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="space-create-title">
+      <h2 id="space-create-title">New space</h2>
+      <p class="sub">Give it a name and choose a type. You can export it later to move it to another device.</p>
+      <div class="field">
+        <label class="field-label" for="space-name">Name</label>
+        <input class="input" id="space-name" type="text" placeholder="e.g. Personal, or “Design team”" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label class="field-label">Type</label>
+        <div class="chips" id="space-type" role="group" aria-label="Space type">
+          <button class="chip on" data-type="personal">Personal</button>
+          <button class="chip" data-type="team">Team (roles)</button>
+        </div>
+        <p class="hint" id="space-type-hint">Just for you and your own devices — everyone is a full writer.</p>
+      </div>
+      <div class="form-error" id="space-create-error"></div>
+      <div class="sheet-actions">
+        <button class="btn-quiet" id="space-create-cancel">Cancel</button>
+        <button class="btn" id="space-create-go">Create space</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manage a team space (members + roles + audit) -->
+  <div class="scrim hidden" id="space-manage-modal">
+    <div class="sheet sheet-wide" role="dialog" aria-modal="true" aria-labelledby="space-manage-title">
+      <h2 id="space-manage-title">Manage space</h2>
+      <p class="sub">Add devices by their id and give each a role. Removing a device revokes it and rotates the key, so it can't follow new changes.</p>
+
+      <div class="code-card">
+        <p class="code-label">This space's id <span style="color:var(--muted)">— share it so an admin can add a device</span></p>
+        <div class="code mono" id="space-manage-id" style="font-size:13px">…</div>
+      </div>
+
+      <p class="section-label">Members &amp; roles</p>
+      <div id="space-members"></div>
+      <div class="add-member">
+        <input class="input" id="member-id" type="text" placeholder="Device id to add" autocomplete="off" spellcheck="false" />
+        <select class="input select" id="member-role" aria-label="Role">
+          <option value="reader">Reader</option>
+          <option value="writer" selected>Writer</option>
+          <option value="admin">Admin</option>
+        </select>
+        <button class="btn" id="member-add">Add</button>
+      </div>
+      <div class="form-error" id="member-error"></div>
+
+      <p class="section-label">Audit log</p>
+      <div class="audit" id="space-audit"></div>
+
+      <div class="sheet-actions">
+        <button class="btn-quiet" id="space-manage-close">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Passphrase prompt (export / import a space) -->
+  <div class="scrim hidden" id="space-pass-modal">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="space-pass-title">
+      <h2 id="space-pass-title">Export space</h2>
+      <p class="sub" id="space-pass-sub">Choose a passphrase. You'll need it to import this backup on another device — there's no way to recover it if you forget it.</p>
+      <div class="field">
+        <label class="field-label" for="space-pass">Passphrase</label>
+        <input class="input" id="space-pass" type="password" placeholder="At least 6 characters" autocomplete="off" />
+      </div>
+      <div class="form-error" id="space-pass-error"></div>
+      <div class="sheet-actions">
+        <button class="btn-quiet" id="space-pass-cancel">Cancel</button>
+        <button class="btn" id="space-pass-go"><span class="js-label">Export</span></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Network (infra) settings -->
+  <div class="scrim hidden" id="network-modal">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="network-title">
+      <h2 id="network-title">Network</h2>
+      <p class="sub">By default Kith finds your devices over the public network and uses n0's free relays only as a fallback. Run your own relay + discovery for full control (see <span class="mono">infra/</span>).</p>
+      <div class="field">
+        <label class="field-label">Mode</label>
+        <div class="chips" id="network-mode" role="group" aria-label="Network mode">
+          <button class="chip on" data-mode="decentralized">Default (serverless)</button>
+          <button class="chip" data-mode="self_hosted">Self-hosted</button>
+        </div>
+      </div>
+      <div id="network-fields" class="hidden">
+        <div class="field">
+          <label class="field-label" for="net-relay">Relay URL</label>
+          <input class="input" id="net-relay" type="text" placeholder="https://relay.example.org/" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="net-token">Relay token <span style="color:var(--muted)">(optional)</span></label>
+          <input class="input" id="net-token" type="text" placeholder="shared secret, or leave blank for an open relay" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="net-pkarr">pkarr endpoint</label>
+          <input class="input" id="net-pkarr" type="text" placeholder="https://dns.example.org/pkarr" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="net-origin">DNS origin domain</label>
+          <input class="input" id="net-origin" type="text" placeholder="dns.example.org" autocomplete="off" spellcheck="false" />
+        </div>
+      </div>
+      <div class="form-error" id="network-error"></div>
+      <p class="hint">Changing this restarts Kith's engine and reconnects your devices.</p>
+      <div class="sheet-actions">
+        <button class="btn-quiet" id="network-cancel">Cancel</button>
+        <button class="btn" id="network-go"><span class="js-label">Apply</span></button>
       </div>
     </div>
   </div>

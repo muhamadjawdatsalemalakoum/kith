@@ -318,6 +318,28 @@ textarea.input{height:auto; min-height:80px; padding:12px 14px; font-family:var(
 .toast.ok{color:var(--success)} .toast.err{color:var(--error)}
 .toast svg{width:16px;height:16px}
 
+/* spaces */
+#spaces-list{display:flex; flex-direction:column; gap:10px}
+.dev.space{cursor:default}
+.dev.space.is-active{border-color:var(--teal); box-shadow:inset 3px 0 0 var(--teal), 0 0 0 1px var(--teal-glow-soft)}
+.dev.space .dev-avatar{background:color-mix(in srgb, var(--teal-glow-soft) 80%, var(--surface-2)); color:var(--teal)}
+.mono{font-family:var(--mono)}
+.hint{color:var(--muted); font-size:12.5px; margin:6px 0 0}
+.sheet-wide{max-width:560px}
+.select{cursor:pointer}
+.select.sm{height:34px; font-size:13px; padding:0 10px; width:auto}
+.add-member{display:flex; gap:8px; align-items:center; margin-top:10px}
+.add-member .input{flex:1; min-width:0; height:42px}
+.add-member .select{width:auto; height:42px}
+.add-member .btn{flex:none}
+.audit{display:flex; flex-direction:column; gap:2px; max-height:190px; overflow-y:auto;
+  border:1px solid var(--line-soft); border-radius:var(--r-2); padding:8px; background:var(--surface-2)}
+.audit-row{display:flex; justify-content:space-between; gap:12px; font-size:12.5px; padding:5px 7px; border-radius:8px}
+.audit-row:hover{background:var(--surface-3)}
+.audit-act{color:var(--text); font-weight:550}
+.audit-who{color:var(--muted); font-family:var(--mono); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:46%}
+#space-manage-id{cursor:pointer; word-break:break-all; line-height:1.5}
+
 /* --------------------------- reduced motion ------------------------------ */
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important}

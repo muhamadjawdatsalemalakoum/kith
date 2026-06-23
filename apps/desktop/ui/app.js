@@ -31,6 +31,22 @@ let demoFiles = [
 ];
 let demoLinkPolls = 0;
 let demoCancelled = new Set();
+let demoSpaces = [
+  { id: "0".repeat(64), name: "Personal", is_default: true, is_active: true, enforced: false, role: null, epoch: 0, members: 0 },
+  { id: "a".repeat(64), name: "Design team", is_default: false, is_active: false, enforced: true, role: "admin", epoch: 1, members: 3 },
+];
+let demoMembers = [
+  { id: DEMO_ID, role: "admin", is_me: true },
+  { id: "b3c1f7a9d2e4" + "b".repeat(40), role: "writer", is_me: false },
+  { id: "c5e2a8f1b6d3" + "c".repeat(40), role: "reader", is_me: false },
+];
+let demoAudit = [
+  { seq: 0, epoch: 0, signer: DEMO_ID, action: "space-created", target: DEMO_ID },
+  { seq: 1, epoch: 0, signer: DEMO_ID, action: "member-added:writer", target: "b3c1f7a9d2e4" + "b".repeat(40) },
+  { seq: 2, epoch: 0, signer: DEMO_ID, action: "member-added:reader", target: "c5e2a8f1b6d3" + "c".repeat(40) },
+  { seq: 3, epoch: 1, signer: DEMO_ID, action: "key-rotated:1", target: "" },
+];
+let demoNetwork = { mode: "decentralized", relay_url: "", relay_token: "", pkarr_relay: "", origin_domain: "" };
 async function mockInvoke(cmd, args = {}) {
   await new Promise((r) => setTimeout(r, 120));
   switch (cmd) {
@@ -90,7 +106,20 @@ async function mockInvoke(cmd, args = {}) {
       { id: "h2", name: "Family photos.zip", size: 248 * 1024 * 1024, direction: "received", peer: "Home desktop", ts: now - 5400, path: "C:\\Users\\You\\Downloads\\Kith\\Family photos.zip" },
     ]; }
     case "clear_history": return null;
-    case "get_settings": return { data_dir: "C:\\Users\\You\\.kith\\memory", download_dir: "C:\\Users\\You\\Downloads\\Kith" };
+    case "get_settings": return { data_dir: "C:\\Users\\You\\.kith\\memory", download_dir: "C:\\Users\\You\\Downloads\\Kith", key_storage: "Windows Credential Manager" };
+    case "list_spaces": return demoSpaces.map((s) => ({ ...s }));
+    case "switch_space": demoSpaces.forEach((s) => { s.is_active = s.id === args.id; }); return null;
+    case "create_space": { const s = { id: ((args.team ? "a1" : "b2") + Date.now() + "0".repeat(64)).slice(0, 64), name: args.name, is_default: false, is_active: false, enforced: !!args.team, role: args.team ? "admin" : null, epoch: 0, members: args.team ? 1 : 0 }; demoSpaces.push(s); return { ...s }; }
+    case "leave_space": demoSpaces = demoSpaces.filter((s) => s.id !== args.id); return true;
+    case "space_members": return demoMembers.map((m) => ({ ...m }));
+    case "space_add_member": demoMembers.push({ id: args.endpoint, role: args.role, is_me: false }); return null;
+    case "space_set_role": { const m = demoMembers.find((x) => x.id === args.endpoint); if (m) m.role = args.role; return null; }
+    case "space_remove_member": demoMembers = demoMembers.filter((x) => x.id !== args.endpoint); return null;
+    case "space_audit": return demoAudit.map((a) => ({ ...a }));
+    case "space_export": return "C:\\Users\\You\\Documents\\kith-space.kithspace";
+    case "space_import": { const s = { id: ("99" + Date.now() + "0".repeat(64)).slice(0, 64), name: "Imported space", is_default: false, is_active: false, enforced: false, role: null, epoch: 0, members: 0 }; demoSpaces.push(s); return { ...s }; }
+    case "get_network": return { ...demoNetwork };
+    case "set_network": demoNetwork = { ...args.settings }; return null;
     case "set_download_dir": return "C:\\Users\\You\\Downloads";
     case "reveal_path": return null;
     case "open_external": window.open(args.url, "_blank"); return null;
@@ -151,6 +180,7 @@ function switchView(view) {
   if (view === "notes") refreshNotes();
   if (view === "tabs") loadTabs();
   if (view === "files") loadFiles();
+  if (view === "spaces") loadSpaces();
   if (view === "agents") loadAgents();
   if (view === "about") loadSettings();
 }
@@ -731,6 +761,12 @@ async function loadSettings() {
     const s = await invoke("get_settings");
     const dl = $("#set-download"); if (dl) { dl.textContent = s.download_dir; dl.title = s.download_dir; }
     const dd = $("#set-datadir"); if (dd) { dd.textContent = s.data_dir; dd.title = s.data_dir; }
+    const ks = $("#set-keys"); if (ks && s.key_storage) { ks.textContent = s.key_storage; ks.title = s.key_storage; }
+  } catch (_) {}
+  try {
+    const n = await invoke("get_network");
+    const ne = $("#set-network");
+    if (ne) ne.textContent = n.mode === "self_hosted" ? "Self-hosted (" + (n.relay_url || "—") + ")" : "Default (serverless)";
   } catch (_) {}
 }
 if ($("#set-download-change")) $("#set-download-change").addEventListener("click", async () => {
@@ -742,6 +778,284 @@ if ($("#set-download-change")) $("#set-download-change").addEventListener("click
 if ($("#set-datadir-open")) $("#set-datadir-open").addEventListener("click", () => {
   const p = $("#set-datadir").textContent;
   if (p && p !== "—") invoke("reveal_path", { path: p }).catch(() => {});
+});
+
+/* -------------------------------- spaces -------------------------------- */
+const SPACE_PERSONAL_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>';
+const SPACE_TEAM_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><path d="M16 7a3 3 0 0 1 0 5.5M17 19a5.5 5.5 0 0 0-2-4.3"/></svg>';
+let manageSpaceId = null;
+let passMode = null; // "export" | "import"
+let passSpaceId = null;
+let createType = "personal";
+
+function btnQuiet(label, onClick) {
+  const b = document.createElement("button");
+  b.className = "btn-quiet";
+  b.textContent = label;
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+async function loadSpaces() {
+  try { renderSpaces(await invoke("list_spaces")); } catch (_) { /* starting */ }
+}
+function renderSpaces(spaces) {
+  const list = $("#spaces-list");
+  list.innerHTML = "";
+  (spaces || []).forEach((s, i) => list.appendChild(spaceEl(s, i)));
+}
+function spaceEl(s, i) {
+  const el = document.createElement("div");
+  el.className = "dev space" + (s.is_active ? " is-active" : "");
+  const av = document.createElement("div");
+  av.className = "dev-avatar";
+  av.innerHTML = s.enforced ? SPACE_TEAM_ICON : SPACE_PERSONAL_ICON;
+  const body = document.createElement("div");
+  body.className = "dev-body";
+  const name = document.createElement("div");
+  name.className = "dev-name";
+  name.textContent = s.name;
+  const meta = document.createElement("div");
+  meta.className = "dev-meta";
+  meta.style.fontFamily = "var(--font)";
+  let bits = [s.enforced ? "Team" : "Personal"];
+  if (s.is_default) bits.push("your default");
+  if (s.enforced) bits.push(s.members + (s.members === 1 ? " member" : " members"), "you're " + (s.role || "reader"));
+  meta.textContent = bits.join(" · ");
+  body.append(name, meta);
+  const actions = document.createElement("div");
+  actions.className = "dev-actions";
+  if (s.is_active) {
+    const badge = document.createElement("span");
+    badge.className = "badge-you";
+    badge.textContent = "Active";
+    actions.appendChild(badge);
+  } else {
+    actions.appendChild(btnQuiet("Use", () => useSpace(s)));
+  }
+  if (s.enforced) actions.appendChild(btnQuiet("Manage", () => openManage(s)));
+  actions.appendChild(btnQuiet("Export", () => openPass("export", s)));
+  if (!s.is_default) actions.appendChild(btnQuiet("Leave", () => leaveSpace(s)));
+  el.append(av, body, actions);
+  if (canAnim) el.animate([{ opacity: 0, transform: "translateY(8px)" }, { opacity: 1, transform: "none" }], { duration: 220, delay: Math.min(i, 8) * 28, easing: "cubic-bezier(.22,1,.36,1)" });
+  return el;
+}
+async function useSpace(s) {
+  try {
+    await invoke("switch_space", { id: s.id });
+    toast("Now working in “" + s.name + "”", "ok");
+    await loadSpaces();
+    refreshNotes();
+  } catch (e) { toast(String(e), "err"); }
+}
+async function leaveSpace(s) {
+  if (!confirm(`Leave “${s.name}”?\n\nIts data is deleted from THIS device. ${s.enforced ? "Other members keep their copies." : "Export it first if you want to keep it."}`)) return;
+  try { await invoke("leave_space", { id: s.id }); toast("Left the space", "ok"); await loadSpaces(); refreshNotes(); }
+  catch (e) { toast(String(e), "err"); }
+}
+
+/* create space */
+$$("#space-type .chip").forEach((c) => c.addEventListener("click", () => {
+  $$("#space-type .chip").forEach((x) => x.classList.remove("on"));
+  c.classList.add("on");
+  createType = c.dataset.type;
+  $("#space-type-hint").textContent = createType === "team"
+    ? "For a trusted circle. You're the admin; add devices with Reader / Writer / Admin roles."
+    : "Just for you and your own devices — everyone is a full writer.";
+}));
+$("#space-new").addEventListener("click", () => {
+  $("#space-name").value = "";
+  $("#space-create-error").textContent = "";
+  $$("#space-type .chip").forEach((x) => x.classList.toggle("on", x.dataset.type === "personal"));
+  createType = "personal";
+  $("#space-type-hint").textContent = "Just for you and your own devices — everyone is a full writer.";
+  openModal("#space-create-modal");
+  setTimeout(() => $("#space-name").focus(), 60);
+});
+$("#space-create-cancel").addEventListener("click", () => closeModal("#space-create-modal"));
+$("#space-create-modal").addEventListener("click", (e) => { if (e.target.id === "space-create-modal") closeModal("#space-create-modal"); });
+$("#space-create-go").addEventListener("click", async () => {
+  const name = $("#space-name").value.trim();
+  if (!name) { $("#space-create-error").textContent = "Give the space a name."; return; }
+  const btn = $("#space-create-go"); btn.disabled = true;
+  try {
+    await invoke("create_space", { name, team: createType === "team" });
+    closeModal("#space-create-modal");
+    toast("Space created", "ok");
+    await loadSpaces();
+  } catch (e) { $("#space-create-error").textContent = String(e); }
+  finally { btn.disabled = false; }
+});
+
+/* manage team space */
+async function openManage(s) {
+  manageSpaceId = s.id;
+  $("#space-manage-title").textContent = "Manage “" + s.name + "”";
+  $("#space-manage-id").textContent = s.id;
+  $("#member-id").value = "";
+  $("#member-error").textContent = "";
+  openModal("#space-manage-modal");
+  await refreshMembers();
+  await refreshAudit();
+}
+async function refreshMembers() {
+  const wrap = $("#space-members");
+  wrap.innerHTML = "";
+  try {
+    const members = await invoke("space_members", { id: manageSpaceId });
+    members.forEach((m) => wrap.appendChild(memberEl(m)));
+  } catch (e) { toast(String(e), "err"); }
+}
+function memberEl(m) {
+  const el = document.createElement("div");
+  el.className = "dev";
+  el.innerHTML = `<div class="dev-avatar">${DEV_ICON}</div><div class="dev-body"><div class="dev-name"></div><div class="dev-meta"></div></div><div class="dev-actions"></div>`;
+  el.querySelector(".dev-name").textContent = m.is_me ? "This device" : shortId(m.id);
+  el.querySelector(".dev-meta").textContent = m.role + " · " + shortId(m.id);
+  el.querySelector(".dev-meta").title = m.id;
+  const acts = el.querySelector(".dev-actions");
+  if (m.is_me) {
+    const b = document.createElement("span"); b.className = "badge-you"; b.textContent = m.role; acts.appendChild(b);
+  } else {
+    const sel = document.createElement("select");
+    sel.className = "input select sm";
+    ["reader", "writer", "admin"].forEach((r) => {
+      const o = document.createElement("option");
+      o.value = r; o.textContent = r[0].toUpperCase() + r.slice(1);
+      if (r === m.role) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.addEventListener("change", async () => {
+      try { await invoke("space_set_role", { id: manageSpaceId, endpoint: m.id, role: sel.value }); toast("Role updated", "ok"); refreshMembers(); refreshAudit(); }
+      catch (e) { toast(String(e), "err"); refreshMembers(); }
+    });
+    acts.appendChild(sel);
+    acts.appendChild(btnQuiet("Remove", async () => {
+      if (!confirm("Remove this device? It's revoked and the space key is rotated, so it can't follow new changes.")) return;
+      try { await invoke("space_remove_member", { id: manageSpaceId, endpoint: m.id }); toast("Removed & re-keyed", "ok"); refreshMembers(); refreshAudit(); loadSpaces(); }
+      catch (e) { toast(String(e), "err"); }
+    }));
+  }
+  return el;
+}
+$("#member-add").addEventListener("click", async () => {
+  const endpoint = $("#member-id").value.trim();
+  const role = $("#member-role").value;
+  $("#member-error").textContent = "";
+  if (!endpoint) { $("#member-error").textContent = "Paste the device's id."; return; }
+  try {
+    await invoke("space_add_member", { id: manageSpaceId, endpoint, role });
+    $("#member-id").value = "";
+    toast("Member added", "ok");
+    refreshMembers(); refreshAudit(); loadSpaces();
+  } catch (e) { $("#member-error").textContent = String(e); }
+});
+async function refreshAudit() {
+  const wrap = $("#space-audit");
+  wrap.innerHTML = "";
+  try {
+    const entries = await invoke("space_audit", { id: manageSpaceId });
+    entries.forEach((e) => {
+      const row = document.createElement("div");
+      row.className = "audit-row";
+      const act = document.createElement("span");
+      act.className = "audit-act";
+      act.textContent = e.action.replace(/:/g, " ");
+      const who = document.createElement("span");
+      who.className = "audit-who";
+      who.textContent = e.target ? shortId(e.target) : "by " + shortId(e.signer);
+      who.title = e.target || e.signer;
+      row.append(act, who);
+      wrap.appendChild(row);
+    });
+  } catch (_) {}
+}
+$("#space-manage-id").addEventListener("click", () => {
+  const id = $("#space-manage-id").textContent;
+  if (id && navigator.clipboard) { navigator.clipboard.writeText(id); toast("Space id copied", "ok"); }
+});
+$("#space-manage-close").addEventListener("click", () => closeModal("#space-manage-modal"));
+$("#space-manage-modal").addEventListener("click", (e) => { if (e.target.id === "space-manage-modal") closeModal("#space-manage-modal"); });
+
+/* export / import via passphrase */
+function openPass(mode, s) {
+  passMode = mode;
+  passSpaceId = s ? s.id : null;
+  $("#space-pass").value = "";
+  $("#space-pass-error").textContent = "";
+  const exporting = mode === "export";
+  $("#space-pass-title").textContent = exporting ? "Export “" + s.name + "”" : "Import a space";
+  $("#space-pass-sub").textContent = exporting
+    ? "Choose a passphrase. You'll need it to import this backup on another device — there's no way to recover it if you forget it."
+    : "Enter the passphrase the backup was exported with, then choose the .kithspace file.";
+  $("#space-pass-go").querySelector(".js-label").textContent = exporting ? "Export" : "Choose file & import";
+  openModal("#space-pass-modal");
+  setTimeout(() => $("#space-pass").focus(), 60);
+}
+$("#space-import").addEventListener("click", () => openPass("import", null));
+$("#space-pass-cancel").addEventListener("click", () => closeModal("#space-pass-modal"));
+$("#space-pass-modal").addEventListener("click", (e) => { if (e.target.id === "space-pass-modal") closeModal("#space-pass-modal"); });
+$("#space-pass-go").addEventListener("click", async () => {
+  const passphrase = $("#space-pass").value;
+  if (!passphrase || passphrase.length < 6) { $("#space-pass-error").textContent = "Use at least 6 characters."; return; }
+  const btn = $("#space-pass-go"); btn.disabled = true;
+  try {
+    if (passMode === "export") {
+      const path = await invoke("space_export", { id: passSpaceId, passphrase });
+      closeModal("#space-pass-modal");
+      if (path) toast("Exported to " + path, "ok");
+    } else {
+      await invoke("space_import", { passphrase });
+      closeModal("#space-pass-modal");
+      toast("Space imported", "ok");
+      await loadSpaces();
+    }
+  } catch (e) { $("#space-pass-error").textContent = String(e); }
+  finally { btn.disabled = false; }
+});
+
+/* -------------------------------- network ------------------------------- */
+let netMode = "decentralized";
+$$("#network-mode .chip").forEach((c) => c.addEventListener("click", () => {
+  $$("#network-mode .chip").forEach((x) => x.classList.remove("on"));
+  c.classList.add("on");
+  netMode = c.dataset.mode;
+  $("#network-fields").classList.toggle("hidden", netMode !== "self_hosted");
+}));
+if ($("#set-network-change")) $("#set-network-change").addEventListener("click", async () => {
+  $("#network-error").textContent = "";
+  let n = { mode: "decentralized", relay_url: "", relay_token: "", pkarr_relay: "", origin_domain: "" };
+  try { n = await invoke("get_network"); } catch (_) {}
+  netMode = n.mode === "self_hosted" ? "self_hosted" : "decentralized";
+  $$("#network-mode .chip").forEach((x) => x.classList.toggle("on", x.dataset.mode === netMode));
+  $("#network-fields").classList.toggle("hidden", netMode !== "self_hosted");
+  $("#net-relay").value = n.relay_url || "";
+  $("#net-token").value = n.relay_token || "";
+  $("#net-pkarr").value = n.pkarr_relay || "";
+  $("#net-origin").value = n.origin_domain || "";
+  openModal("#network-modal");
+});
+$("#network-cancel").addEventListener("click", () => closeModal("#network-modal"));
+$("#network-modal").addEventListener("click", (e) => { if (e.target.id === "network-modal") closeModal("#network-modal"); });
+$("#network-go").addEventListener("click", async () => {
+  $("#network-error").textContent = "";
+  const settings = {
+    mode: netMode,
+    relay_url: $("#net-relay").value.trim(),
+    relay_token: $("#net-token").value.trim(),
+    pkarr_relay: $("#net-pkarr").value.trim(),
+    origin_domain: $("#net-origin").value.trim(),
+  };
+  if (netMode === "self_hosted" && !settings.relay_url) { $("#network-error").textContent = "Enter your relay URL."; return; }
+  const btn = $("#network-go"); btn.disabled = true;
+  btn.querySelector(".js-label").textContent = "Applying…";
+  try {
+    await invoke("set_network", { settings });
+    closeModal("#network-modal");
+    toast("Network updated — reconnecting", "ok");
+    loadSettings();
+  } catch (e) { $("#network-error").textContent = String(e); }
+  finally { btn.disabled = false; btn.querySelector(".js-label").textContent = "Apply"; }
 });
 
 /* ------------------------------ onboarding ------------------------------ */
@@ -769,7 +1083,10 @@ async function maybeOnboard() {
 /* ------------------------------ global keys ----------------------------- */
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    if (!$("#link-modal").classList.contains("hidden")) closeLink();
+    const dismiss = ["#space-pass-modal", "#space-manage-modal", "#space-create-modal", "#network-modal"]
+      .find((id) => !$(id).classList.contains("hidden"));
+    if (dismiss) closeModal(dismiss);
+    else if (!$("#link-modal").classList.contains("hidden")) closeLink();
     else if (!$("#join-modal").classList.contains("hidden")) closeJoin();
     else if (!$("#welcome-modal").classList.contains("hidden")) dismissWelcome();
   }
