@@ -45,7 +45,7 @@ iroh-blobs = "=0.103.0"
 n0-future = "0.3"
 # Key-confirmation MAC for pairing + the group-key auth handshake.
 hmac = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 # At-rest encryption (AEAD) + constant-time comparison for auth.
 chacha20poly1305 = "0.10"
 subtle = "2"
