@@ -37,10 +37,17 @@ What's enforced (with tests):
 
 Current limitations:
 
-- The at-rest and group keys are stored in files in the data directory (`0600` on
-  Unix; an ACL restricted to the current user on Windows). This guards a stray copy,
-  but not someone who already has full read access to the directory. Moving the keys
-  into an OS keychain / a passphrase is planned.
+- **Key storage.** The at-rest and group keys can live in the **OS keychain** (Windows
+  Credential Manager / macOS Keychain; the desktop app opts in). Where there is no
+  keychain backend (e.g. headless Linux) they fall back to hardened key files (`0600` on
+  Unix; an ACL restricted to the current user on Windows), which guard a stray copy but
+  not someone with full read access to the directory. Epoch keys (`epochs.bin`) remain
+  files.
+- **Recovery / no account.** Because there is no account, the only recovery if every
+  device is lost is an **encrypted Space export**: a whole Space (replica + blobs +
+  membership) sealed with an Argon2id-stretched passphrase (XChaCha20-Poly1305),
+  importable on a fresh device. Losing all devices *without* an export means the data is
+  gone — the app says so plainly.
 - **Role enforcement** holds against *honest* peers (it relies on honest peers to drop
   unauthorized changes; an honest majority is assumed for liveness). It does not stop a
   Reader from forking its own private copy locally — only from getting its writes

@@ -60,6 +60,11 @@ tracing = "0.1"
 data-encoding = "2"
 # URL parsing for the self-hosted pkarr publish endpoint (Infra::SelfHosted).
 url = "2"
+# OS keychain for at-rest/group keys. Native backends on Windows/macOS (no C deps); on
+# Linux there's no backend here, so the engine falls back to the hardened key file.
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native"] }
+# Argon2id passphrase KDF for encrypted Space export/import.
+argon2 = "0.5"
 # Stable per-entry ids for memory entries (random v4 — id-based forget).
 uuid = { version = "1", features = ["v4"] }
 

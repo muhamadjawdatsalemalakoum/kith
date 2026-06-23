@@ -255,9 +255,23 @@ live in `infra/`. Tests: `selfhosted_endpoint_builds_and_syncs` (two peers conve
 self-hosted relay; under `test-utils` the arm trusts the in-process relay so it runs offline)
 + the existing `state_syncs_over_relay`.
 
-> Later (not yet in this pass): keychain + encrypted export/recovery (EV2-M7),
-> multi-stream throughput + a measured benchmark (EV2-M8), and wiring every capability
-> through the desktop GUI (EV2-M10).
+### EV2-M7 — Key hardening + encrypted export/recovery · ✅ DONE
+- **Keychain:** `KeyStore::{File, Keychain}` (+ `CoreConfig::with_keychain`). With
+  `Keychain`, a Space's group/at-rest keys prefer the OS keychain (Windows Credential
+  Manager / macOS Keychain via the `keyring` crate, no C deps), migrating an existing key
+  file in and deleting it once stored; no keychain backend (headless Linux) ⇒ transparent
+  hardened-file fallback. The desktop opts in.
+- **Encrypted export/import:** `Mesh::export_space` / `import_space` seal a whole Space
+  (replica + membership + epoch keys + group/at-rest keys, plus blob contents exported via
+  the store API since the live store files are locked/non-portable) with an Argon2id-
+  stretched passphrase + XChaCha20-Poly1305. Restores byte-identically on a fresh device;
+  path-traversal-safe extraction. The no-account recovery path.
+- **Tests:** `keychain_roundtrip` (real OS keychain; skips on a backend-less host),
+  `space_export_import_roundtrip`, `space_export_import_preserves_blobs`,
+  `import_with_wrong_passphrase_fails`.
+
+> Later (not yet in this pass): multi-stream throughput + a measured benchmark (EV2-M8),
+> and wiring every capability through the desktop GUI (EV2-M10).
 
 ---
 

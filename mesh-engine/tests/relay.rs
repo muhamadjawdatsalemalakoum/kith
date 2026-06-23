@@ -16,6 +16,7 @@ async fn relay_mesh(dir: &std::path::Path, relay_map: iroh::RelayMap) -> Mesh {
         infra: Infra::LocalRelay { relay_map },
         group_key: Some([5u8; 32]), // both relay peers share a group
         enable_blobs: false,
+        key_store: mesh_engine::KeyStore::File,
     })
     .await
     .unwrap()
@@ -72,6 +73,7 @@ async fn selfhosted_endpoint_builds_and_syncs() {
         },
         group_key: Some([6u8; 32]),
         enable_blobs: false,
+        key_store: mesh_engine::KeyStore::File,
     };
 
     let a = Mesh::start(cfg(da.path())).await.unwrap();

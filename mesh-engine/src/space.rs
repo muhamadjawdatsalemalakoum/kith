@@ -33,6 +33,7 @@ use iroh_blobs::{BlobsProtocol, Hash};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Mutex};
 
+use crate::config::KeyStore;
 use crate::doc::SharedDoc;
 use crate::epoch::{self, EpochStore};
 use crate::error::{CoreError, Result};
@@ -188,12 +189,17 @@ impl SpaceState {
         actor: ActorId,
         secret_bytes: [u8; 32],
         configured_key: Option<[u8; 32]>,
+        key_store: KeyStore,
     ) -> Result<SpaceState> {
         std::fs::create_dir_all(&dir)?;
         let name = read_name(&dir).unwrap_or_else(|| default_name(&id));
         let group_key = match configured_key {
             Some(k) => k,
-            None => keys::load_or_create(&dir.join("group.key"))?,
+            None => keys::secured_load_or_create(
+                &format!("space:{}:group", id.to_hex()),
+                &dir.join("group.key"),
+                key_store,
+            )?,
         };
         let doc_path = dir.join("doc.automerge");
 
@@ -202,7 +208,7 @@ impl SpaceState {
         let membership = Membership::open(id, dir.join("members.log"))?;
 
         // At-rest: enforced Spaces key the snapshot off the current epoch key (so a
-        // revocation re-keys it); permissive Spaces use a per-device file key.
+        // revocation re-keys it); permissive Spaces use a per-device file/keychain key.
         let (atrest_key, atrest_epoch, epoch_store, doc) = if membership.is_some() {
             let store = EpochStore::load(dir.join("epochs.bin"));
             let eff = store.max_epoch().unwrap_or(0);
@@ -213,7 +219,11 @@ impl SpaceState {
             let doc = load_enforced(&doc_path, actor, &store, &id);
             (at, eff, Some(StdMutex::new(store)), doc)
         } else {
-            let at = keys::load_or_create(&dir.join("atrest.key"))?;
+            let at = keys::secured_load_or_create(
+                &format!("space:{}:atrest", id.to_hex()),
+                &dir.join("atrest.key"),
+                key_store,
+            )?;
             let doc = load_or_recover(&doc_path, actor, &at);
             (at, 0u64, None, doc)
         };
@@ -525,6 +535,20 @@ impl SpaceState {
 
     pub(crate) fn group_key(&self) -> [u8; 32] {
         self.group_key
+    }
+
+    /// The current at-rest key bytes (for an encrypted export, where the key may live in
+    /// the OS keychain rather than the Space dir).
+    pub(crate) fn atrest_key_bytes(&self) -> [u8; 32] {
+        *self.atrest_key.lock().expect("atrest lock")
+    }
+
+    /// Re-add exported blob contents into this Space's store (content-addressed → identical
+    /// hashes), holding the temp tags so the restored blobs aren't garbage-collected.
+    pub(crate) async fn import_blobs(&self, blobs: &[Vec<u8>]) -> Result<()> {
+        let tags = blobs::import_all(&self.store, blobs).await?;
+        self.kept_tags.lock().await.extend(tags);
+        Ok(())
     }
 
     pub(crate) fn sync(&self) -> &Arc<MeshSync> {

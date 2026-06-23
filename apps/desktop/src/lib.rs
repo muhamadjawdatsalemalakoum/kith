@@ -729,9 +729,13 @@ async fn join_link(
     if let Some(old) = guard.take() {
         let _ = old.shutdown().await;
     }
-    let new = Mesh::start(CoreConfig::serverless(&state.data_dir))
-        .await
-        .map_err(|e| e.to_string())?;
+    let new = Mesh::start(
+        CoreConfig::serverless(&state.data_dir)
+            .with_blobs(true)
+            .with_keychain(true),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let dev = Device {
         id: host_id.clone(),
@@ -806,9 +810,13 @@ async fn leave_group(state: State<'_, AppState>) -> Result<(), String> {
     if let Some(old) = guard.take() {
         let _ = old.shutdown().await;
     }
-    let new = Mesh::start(CoreConfig::serverless(&state.data_dir).with_blobs(true))
-        .await
-        .map_err(|e| e.to_string())?;
+    let new = Mesh::start(
+        CoreConfig::serverless(&state.data_dir)
+            .with_blobs(true)
+            .with_keychain(true),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     *guard = Some(new);
     Ok(())
 }
@@ -1088,7 +1096,13 @@ pub fn serve() {
         install_panic_logger(&data_dir);
         // Try to own the engine. If another Kith (usually the GUI) already owns the data
         // dir, the content store is locked and start fails — then we bridge to it.
-        match Mesh::start(CoreConfig::serverless(&data_dir).with_blobs(true)).await {
+        match Mesh::start(
+            CoreConfig::serverless(&data_dir)
+                .with_blobs(true)
+                .with_keychain(true),
+        )
+        .await
+        {
             Ok(mesh) => {
                 for d in load_devices(&data_dir) {
                     if let Ok(addr) = endpoint_addr_from_id(&d.id) {
@@ -1133,7 +1147,9 @@ pub fn run() {
             // One engine for the whole app, serverless by default (DHT + n0 relay).
             // Blobs enabled so files can be served to / fetched from your circle.
             let mesh = match tauri::async_runtime::block_on(Mesh::start(
-                CoreConfig::serverless(&data_dir).with_blobs(true),
+                CoreConfig::serverless(&data_dir)
+                    .with_blobs(true)
+                    .with_keychain(true),
             )) {
                 Ok(m) => m,
                 Err(e) => {

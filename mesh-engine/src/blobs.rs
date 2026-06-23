@@ -200,6 +200,44 @@ pub async fn ensure_local(
     Ok(())
 }
 
+/// Read every complete blob in the store as raw bytes — for an encrypted Space export
+/// (the on-disk store files are locked while open and aren't portable, so we export the
+/// content itself, which re-imports to the identical content-addressed hashes).
+pub async fn export_all(store: &FsStore) -> Result<Vec<Vec<u8>>> {
+    use n0_future::StreamExt;
+    let mut hashes = Vec::new();
+    let mut stream = store.list().stream().await.context("list blobs")?;
+    while let Some(h) = stream.next().await {
+        hashes.push(h.context("list blob")?);
+    }
+    let mut out = Vec::new();
+    for hash in hashes {
+        if is_local_complete(store, hash).await {
+            let bytes = store
+                .get_bytes(hash)
+                .await
+                .map_err(|e| CoreError::Sync(format!("read blob for export: {e}")))?;
+            out.push(bytes.to_vec());
+        }
+    }
+    Ok(out)
+}
+
+/// Re-add exported blob contents into a store (content-addressed → identical hashes),
+/// returning the [`TempTag`]s the caller must hold to keep the blobs from being GC'd.
+pub async fn import_all(store: &FsStore, blobs: &[Vec<u8>]) -> Result<Vec<TempTag>> {
+    let mut tags = Vec::with_capacity(blobs.len());
+    for data in blobs {
+        let tt = store
+            .add_bytes(data.clone())
+            .temp_tag()
+            .await
+            .context("re-add imported blob")?;
+        tags.push(tt);
+    }
+    Ok(tags)
+}
+
 /// Whether the blob is already fully present in the local store (no network).
 pub async fn is_local_complete(store: &FsStore, hash: Hash) -> bool {
     store

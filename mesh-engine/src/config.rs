@@ -2,6 +2,19 @@
 
 use std::path::PathBuf;
 
+/// Where a Space's at-rest / group keys are stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeyStore {
+    /// Hardened key files in the data dir (`0600` / restricted ACL). The default —
+    /// dependency-free and works everywhere.
+    #[default]
+    File,
+    /// The OS keychain (Windows Credential Manager / macOS Keychain) when available,
+    /// falling back to the hardened file where there is no backend (e.g. headless Linux).
+    /// The no-account recovery path is the encrypted Space export.
+    Keychain,
+}
+
 /// How a mesh peer is configured at startup.
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
@@ -17,6 +30,8 @@ pub struct CoreConfig {
     /// Serve the content/blob primitive. OFF by default — blob serving is not yet
     /// access-gated, so only enable it among trusted peers / on trusted networks.
     pub enable_blobs: bool,
+    /// Where at-rest / group keys live (file by default; OS keychain when opted in).
+    pub key_store: KeyStore,
 }
 
 /// Relay + discovery infrastructure selection.
@@ -72,6 +87,7 @@ impl CoreConfig {
             infra: Infra::Decentralized,
             group_key: None,
             enable_blobs: false,
+            key_store: KeyStore::File,
         }
     }
 
@@ -82,6 +98,7 @@ impl CoreConfig {
             infra: Infra::N0Default,
             group_key: None,
             enable_blobs: false,
+            key_store: KeyStore::File,
         }
     }
 
@@ -104,6 +121,7 @@ impl CoreConfig {
             },
             group_key: None,
             enable_blobs: false,
+            key_store: KeyStore::File,
         }
     }
 
@@ -114,6 +132,7 @@ impl CoreConfig {
             infra: Infra::LocalOnly,
             group_key: None,
             enable_blobs: false,
+            key_store: KeyStore::File,
         }
     }
 
@@ -127,6 +146,17 @@ impl CoreConfig {
     /// Enable serving the content/blob primitive (off by default).
     pub fn with_blobs(mut self, enable: bool) -> Self {
         self.enable_blobs = enable;
+        self
+    }
+
+    /// Store at-rest / group keys in the OS keychain (when available; file fallback
+    /// otherwise). Off by default. The encrypted Space export is the recovery path.
+    pub fn with_keychain(mut self, enable: bool) -> Self {
+        self.key_store = if enable {
+            KeyStore::Keychain
+        } else {
+            KeyStore::File
+        };
         self
     }
 }

@@ -33,7 +33,9 @@ mod doc;
 mod endpoint;
 mod epoch;
 mod error;
+mod export;
 mod identity;
+mod keychain;
 mod keys;
 mod membership;
 mod pair;
@@ -60,7 +62,7 @@ pub use automerge::Automerge;
 pub use iroh::EndpointAddr;
 pub use iroh_blobs::Hash;
 
-pub use config::{CoreConfig, Infra};
+pub use config::{CoreConfig, Infra, KeyStore};
 pub use doc::SharedDoc;
 pub use error::{CoreError, Result};
 pub use membership::{AuditEntry, Role};
@@ -100,6 +102,8 @@ struct Inner {
     device_secret: [u8; 32],
     /// The Space the bare [`Mesh`] methods operate on (default until changed).
     active: StdMutex<SpaceId>,
+    /// Where new Spaces store their at-rest / group keys (file or OS keychain).
+    key_store: KeyStore,
     /// Pinged on a local change, a new peer, or a new Space to wake the sync loop.
     changed: Arc<Notify>,
     /// The currently-armed pairing (Some while in "add a device" mode), naming a Space.
@@ -156,6 +160,7 @@ impl Mesh {
             actor.clone(),
             device_secret,
             config.group_key,
+            config.key_store,
         )
         .await?;
         registry.insert(default_space);
@@ -174,8 +179,15 @@ impl Mesh {
                 if id == default_id {
                     continue;
                 }
-                let state =
-                    SpaceState::open(entry.path(), id, actor.clone(), device_secret, None).await?;
+                let state = SpaceState::open(
+                    entry.path(),
+                    id,
+                    actor.clone(),
+                    device_secret,
+                    None,
+                    config.key_store,
+                )
+                .await?;
                 registry.insert(state);
             }
         }
@@ -215,6 +227,7 @@ impl Mesh {
             device_pubkey,
             device_secret,
             active: StdMutex::new(default_id),
+            key_store: config.key_store,
             changed,
             pair_armed,
             pair_joined,
@@ -273,6 +286,7 @@ impl Mesh {
             self.inner.actor.clone(),
             self.inner.device_secret,
             None,
+            self.inner.key_store,
         )
         .await?;
         self.inner.registry.insert(state);
@@ -297,6 +311,7 @@ impl Mesh {
             self.inner.actor.clone(),
             self.inner.device_secret,
             None,
+            self.inner.key_store,
         )
         .await?;
         self.inner.registry.insert(state);
@@ -324,6 +339,9 @@ impl Mesh {
         }
         state.shutdown().await;
         let _ = std::fs::remove_dir_all(self.space_dir(id));
+        // Also remove any keychain-stored keys for this Space (best-effort).
+        keychain::delete(&format!("space:{}:group", id.to_hex()));
+        keychain::delete(&format!("space:{}:atrest", id.to_hex()));
         // Wake the loop so it drops this Space's per-peer sync tasks.
         self.inner.changed.notify_waiters();
         Ok(true)
@@ -387,6 +405,67 @@ impl Mesh {
         self.inner.registry.get(&id).map(|s| s.group_key())
     }
 
+    /// Export a Space to an **encrypted, passphrase-protected** bundle — the no-account
+    /// recovery path. Archives the whole Space (replica + blobs + membership + epoch keys),
+    /// injecting the group/at-rest keys even when they live in the OS keychain, then seals
+    /// it with an Argon2id-stretched passphrase. Restores on a fresh device via
+    /// [`Mesh::import_space`]. Losing every device without an export means the data is gone.
+    pub async fn export_space(&self, id: SpaceId, passphrase: &str) -> Result<Vec<u8>> {
+        let state = self
+            .inner
+            .registry
+            .get(&id)
+            .ok_or_else(|| CoreError::Other(anyhow::anyhow!("not a member of that space")))?;
+        state.save().await?; // freshest snapshot on disk before archiving
+        let dir = self.space_dir(id);
+        let mut files = export::collect_dir(&dir)?;
+        // The group key (and, for a permissive Space, the at-rest key) may live in the
+        // keychain rather than the dir — inject the in-memory copies so the bundle stands
+        // alone on a fresh device.
+        export::upsert(&mut files, "group.key", state.group_key().to_vec());
+        if !state.enforced() {
+            export::upsert(&mut files, "atrest.key", state.atrest_key_bytes().to_vec());
+        }
+        // Blob contents are exported via the store API (the raw store dir is locked +
+        // non-portable) and re-import to identical content-addressed hashes.
+        let blobs = blobs::export_all(state.store()).await?;
+        export::seal(&id, &files, &blobs, passphrase)
+    }
+
+    /// Import an encrypted Space bundle onto this device (recovery / migration). Returns
+    /// the restored [`SpaceId`]. `Err` on a wrong passphrase, a corrupt bundle, or if the
+    /// Space is already present here.
+    pub async fn import_space(&self, bundle: &[u8], passphrase: &str) -> Result<SpaceId> {
+        let opened = export::open(bundle, passphrase)?;
+        let id = opened.id;
+        if self.inner.registry.contains(&id) {
+            return Err(CoreError::Other(anyhow::anyhow!(
+                "that space is already on this device"
+            )));
+        }
+        let dir = self.space_dir(id);
+        if dir.exists() {
+            return Err(CoreError::Other(anyhow::anyhow!(
+                "space data already exists on disk"
+            )));
+        }
+        export::extract_to(&dir, &opened.files)?;
+        let state = SpaceState::open(
+            dir,
+            id,
+            self.inner.actor.clone(),
+            self.inner.device_secret,
+            None,
+            self.inner.key_store,
+        )
+        .await?;
+        // Re-add the exported blob contents into this Space's fresh store.
+        state.import_blobs(&opened.blobs).await?;
+        self.inner.registry.insert(state);
+        self.inner.changed.notify_waiters();
+        Ok(id)
+    }
+
     // ---- role-enforced Spaces (membership rooted in EndpointId) ----
 
     /// Create a **role-enforced** Space: like [`Mesh::create_space`] but with a signed
@@ -415,6 +494,7 @@ impl Mesh {
             self.inner.actor.clone(),
             self.inner.device_secret,
             None,
+            self.inner.key_store,
         )
         .await?;
         // Mint epoch 0's Admin-signed key (the revocation substrate + at-rest key).
@@ -462,6 +542,7 @@ impl Mesh {
             self.inner.actor.clone(),
             self.inner.device_secret,
             None,
+            self.inner.key_store,
         )
         .await?;
         self.inner.registry.insert(state);
