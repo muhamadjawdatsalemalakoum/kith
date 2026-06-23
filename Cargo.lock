@@ -3242,6 +3242,7 @@ name = "kith-files"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "data-encoding",
  "mesh-engine",
  "mesh-mcp",
  "serde_json",

@@ -20,6 +20,8 @@ mesh-mcp = { path = "../../mesh-mcp" }
 serde_json.workspace = true
 anyhow.workspace = true
 uuid = { workspace = true }
+# Base64 for returning binary file contents to an agent (same crate the engine uses).
+data-encoding.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

@@ -679,6 +679,27 @@ impl Mesh {
         .await
     }
 
+    /// BLOB PRIMITIVE — read `[start, end)` bytes of `hash` from the active Space,
+    /// fetching the blob from `peer` first if it isn't already local. Backs `files.read`
+    /// so an agent reads file contents across devices without writing to a user path.
+    pub async fn read_file(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        hash: Hash,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>> {
+        read_for_space(
+            &self.inner,
+            &self.active_state(),
+            peer.into(),
+            hash,
+            start,
+            end,
+        )
+        .await
+    }
+
     /// Persist the active Space's replica now (a compacted snapshot).
     pub async fn save(&self) -> Result<()> {
         self.active_state().save().await
@@ -797,6 +818,18 @@ impl SpaceHandle {
             on_progress,
         )
         .await
+    }
+
+    /// Read `[start, end)` bytes of `hash` from this Space, fetching it from `peer` first
+    /// if it isn't already local. Backs `files.read` for an MCP server bound to this Space.
+    pub async fn read_file(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        hash: Hash,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>> {
+        read_for_space(&self.inner, &self.space, peer.into(), hash, start, end).await
     }
 
     /// Persist this Space's replica now.
@@ -957,6 +990,36 @@ async fn fetch_for_space(
         on_progress,
     )
     .await
+}
+
+/// Read `[start, end)` bytes of `hash` in `space` into memory, fetching the blob from
+/// `peer` first if it isn't already local (membership/role-gated like any fetch). Backs
+/// `files.read`: an agent reads file contents across devices without a user-path write.
+async fn read_for_space(
+    inner: &Arc<Inner>,
+    space: &Arc<SpaceState>,
+    peer: EndpointAddr,
+    hash: Hash,
+    start: u64,
+    end: u64,
+) -> Result<Vec<u8>> {
+    if !blobs::is_local_complete(space.store(), hash).await {
+        let connect = inner.router.endpoint().connect(peer, iroh_blobs::ALPN);
+        let conn = tokio::time::timeout(CONNECT_TIMEOUT, connect)
+            .await
+            .map_err(|_| CoreError::Unreachable("connect timed out".into()))?
+            .map_err(|e| CoreError::Unreachable(e.to_string()))?;
+        blobs::ensure_local(
+            space.store(),
+            conn,
+            hash,
+            &space.group_key(),
+            &space.id(),
+            |_, _| {},
+        )
+        .await?;
+    }
+    blobs::read_range(space.store(), hash, start, end).await
 }
 
 /// Migrate a pre-Spaces flat data directory (`data_dir/{doc.automerge,group.key,

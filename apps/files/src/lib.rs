@@ -130,6 +130,113 @@ impl Files {
             .ok_or_else(|| CoreError::Other(anyhow::anyhow!("file offer not found")))?;
         self.fetch(&entry, dest_dir, on_progress).await
     }
+
+    /// Read the CONTENTS of an offered file (by id) for an agent — fetching the bytes
+    /// from the offering device if they aren't already here, then returning a bounded
+    /// window. Reads are content-addressed (by hash), so a malicious offer *name* can
+    /// never make this touch an arbitrary path — there is no path traversal surface.
+    ///
+    /// `offset` starts the window; `max_len` bounds it (capped at [`READ_CAP`] so a huge
+    /// file is never loaded whole — the agent paginates with `offset`/`eof`). Text is
+    /// returned as UTF-8; binary (or a chunk that isn't valid text) is returned base64,
+    /// so an agent gets a safe, correct excerpt rather than a mojibake dump.
+    pub async fn read(&self, id: &str, offset: u64, max_len: Option<u64>) -> Result<FileContent> {
+        let entry = self
+            .all()
+            .await
+            .into_iter()
+            .find(|e| e.id == id)
+            .ok_or_else(|| CoreError::Other(anyhow::anyhow!("file offer not found")))?;
+        let size = entry.size;
+        let hash = hash_from_str(&entry.hash)?;
+        let start = offset.min(size);
+        let want = max_len.filter(|m| *m > 0).unwrap_or(READ_CAP).min(READ_CAP);
+        let end = start.saturating_add(want).min(size);
+
+        // `read_file` fetches-if-missing then reads the range; for a file we offer
+        // ourselves the bytes are already local, so the peer addr is never dialed.
+        let addr = endpoint_addr_from_id(&entry.from_id)?;
+        let bytes = self.mesh.read_file(addr, hash, start, end).await?;
+
+        let returned = bytes.len() as u64;
+        let eof = end >= size;
+        let (encoding, content) = if looks_like_text(&bytes) {
+            let text = match std::str::from_utf8(&bytes) {
+                Ok(s) => s.to_string(),
+                // A range read can split a trailing multi-byte char; keep the valid prefix.
+                Err(e) => String::from_utf8_lossy(&bytes[..e.valid_up_to()]).into_owned(),
+            };
+            ("utf8", text)
+        } else {
+            ("base64", data_encoding::BASE64.encode(&bytes))
+        };
+
+        Ok(FileContent {
+            id: entry.id,
+            name: entry.name,
+            size,
+            offset: start,
+            returned,
+            eof,
+            truncated: !eof,
+            encoding: encoding.to_string(),
+            content,
+        })
+    }
+
+    /// Search offered files by name (case-insensitive substring) across the circle —
+    /// cheap metadata search, no fetch. An empty query returns nothing (not everything).
+    pub async fn search(&self, query: &str) -> Vec<FileEntry> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        self.all()
+            .await
+            .into_iter()
+            .filter(|e| e.name.to_lowercase().contains(&q))
+            .collect()
+    }
+}
+
+/// A bounded window of an offered file's contents, returned by [`Files::read`].
+#[derive(Debug, Clone)]
+pub struct FileContent {
+    pub id: String,
+    pub name: String,
+    /// Full size of the file in bytes.
+    pub size: u64,
+    /// Byte offset this window starts at.
+    pub offset: u64,
+    /// Number of bytes in this window.
+    pub returned: u64,
+    /// Whether this window reaches the end of the file.
+    pub eof: bool,
+    /// Whether more remains beyond this window (`!eof`).
+    pub truncated: bool,
+    /// `"utf8"` (text in `content`) or `"base64"` (binary, base64 in `content`).
+    pub encoding: String,
+    /// The window's bytes as text or base64, per `encoding`.
+    pub content: String,
+}
+
+/// Default per-read byte cap. A larger file is paginated by the agent via `offset`/`eof`,
+/// so `files.read` never loads an unbounded blob into memory.
+const READ_CAP: u64 = 256 * 1024;
+
+/// Heuristic text/binary sniff over the bytes we actually read: text iff there's no NUL
+/// byte and the bytes are valid UTF-8 — tolerating a single incomplete trailing multi-byte
+/// char, since a range read can split one. Keeps a chunk of a UTF-8 file classified as text.
+fn looks_like_text(b: &[u8]) -> bool {
+    if b.iter().take(8192).any(|&c| c == 0) {
+        return false;
+    }
+    match std::str::from_utf8(b) {
+        Ok(_) => true,
+        // `error_len() == None` means the input simply ended mid-character (a split), not
+        // an actually-invalid byte; accept it if the valid prefix is essentially all of it.
+        Err(e) => e.error_len().is_none() && e.valid_up_to() + 4 >= b.len(),
+    }
 }
 
 fn device_name() -> String {
@@ -203,6 +310,20 @@ impl mesh_mcp::McpApp for Files {
                 "Download an offered file (by id) into a destination folder.",
                 json!({ "type": "object", "properties": { "id": { "type": "string" }, "dest": { "type": "string" } }, "required": ["id", "dest"] }),
             ),
+            mesh_mcp::ToolDef::new(
+                "files.read",
+                "Read the CONTENTS of an offered file by id (fetching it across your devices if needed). Returns a bounded window: text as UTF-8, binary as base64. Page large files with 'offset'/'eof'.",
+                json!({ "type": "object", "properties": {
+                    "id": { "type": "string" },
+                    "offset": { "type": "integer", "minimum": 0, "description": "Byte offset to start at (default 0)." },
+                    "length": { "type": "integer", "minimum": 1, "description": "Max bytes to return (capped at 256 KiB)." }
+                }, "required": ["id"] }),
+            ),
+            mesh_mcp::ToolDef::new(
+                "files.search",
+                "Search offered files by name across your devices (case-insensitive).",
+                json!({ "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }),
+            ),
         ]
     }
 
@@ -248,6 +369,36 @@ impl mesh_mcp::McpApp for Files {
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "path": p.to_string_lossy() }))
+            }
+            "files.read" => {
+                let id = args
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or("missing 'id'")?;
+                let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+                let length = args.get("length").and_then(|v| v.as_u64());
+                let c = self
+                    .read(id, offset, length)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({
+                    "id": c.id, "name": c.name, "size": c.size, "offset": c.offset,
+                    "returned": c.returned, "eof": c.eof, "truncated": c.truncated,
+                    "encoding": c.encoding, "content": c.content,
+                }))
+            }
+            "files.search" => {
+                let query = args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .ok_or("missing 'query'")?;
+                let files: Vec<_> = self
+                    .search(query)
+                    .await
+                    .into_iter()
+                    .map(|e| json!({ "id": e.id, "name": e.name, "size": e.size, "from": e.from_name }))
+                    .collect();
+                Ok(json!({ "files": files }))
             }
             other => Err(format!("unknown tool: {other}")),
         }

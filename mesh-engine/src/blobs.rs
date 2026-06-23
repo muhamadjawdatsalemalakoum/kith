@@ -130,49 +130,9 @@ pub async fn fetch_to_with_progress(
     dest: &Path,
     group_key: &[u8; 32],
     space_id: &SpaceId,
-    mut on_progress: impl FnMut(u64, bool),
+    on_progress: impl FnMut(u64, bool),
 ) -> Result<()> {
-    let hf = HashAndFormat::raw(hash);
-
-    // Resume: only request what's missing (everything, on a first fetch).
-    let local = store
-        .remote()
-        .local(hf)
-        .await
-        .context("inspect local store")?;
-    if !local.is_complete() {
-        // Name the Space, then prove we hold its group key, before requesting any bytes
-        // (the dispatcher routes on the SpaceId and gates on the key; an unauthenticated
-        // peer — or one naming the wrong Space — is served nothing).
-        {
-            let (mut a_send, mut a_recv) = conn.open_bi().await.context("open blob auth stream")?;
-            a_send
-                .write_all(space_id.as_bytes())
-                .await
-                .context("send space id")?;
-            crate::auth::initiator(group_key, &mut a_send, &mut a_recv)
-                .await
-                .context("blob group authentication")?;
-            let _ = a_send.finish();
-        }
-        let route_conn = conn.clone(); // route can upgrade relay→direct mid-transfer
-        let get = store.remote().execute_get(conn, local.missing());
-        let mut stream = get.stream();
-        loop {
-            match tokio::time::timeout(STALL_TIMEOUT, stream.next()).await {
-                Err(_) => return Err(CoreError::Sync("download stalled".into())),
-                Ok(None) => break,
-                Ok(Some(GetProgressItem::Done(_))) => break,
-                Ok(Some(GetProgressItem::Error(e))) => {
-                    return Err(CoreError::Sync(format!("download failed: {e}")))
-                }
-                Ok(Some(GetProgressItem::Progress(offset))) => {
-                    on_progress(offset, conn_is_relayed(&route_conn));
-                }
-            }
-        }
-    }
-
+    ensure_local(store, conn, hash, group_key, space_id, on_progress).await?;
     // Write the verified bytes out to `dest`.
     store
         .export_with_opts(ExportOptions {
@@ -183,6 +143,85 @@ pub async fn fetch_to_with_progress(
         .await
         .with_context(|| format!("export to {}", dest.display()))?;
     Ok(())
+}
+
+/// Ensure the blob named by `hash` is fully present locally, fetching the missing parts
+/// over `conn` (resuming from any partial data) if it isn't. No-op if already complete.
+/// The transfer is SpaceId-routed + group-key gated exactly like [`fetch_to_with_progress`]
+/// — it is the shared download core behind both download-to-path and read-into-memory.
+pub async fn ensure_local(
+    store: &FsStore,
+    conn: Connection,
+    hash: Hash,
+    group_key: &[u8; 32],
+    space_id: &SpaceId,
+    mut on_progress: impl FnMut(u64, bool),
+) -> Result<()> {
+    let hf = HashAndFormat::raw(hash);
+    // Resume: only request what's missing (everything, on a first fetch).
+    let local = store
+        .remote()
+        .local(hf)
+        .await
+        .context("inspect local store")?;
+    if local.is_complete() {
+        return Ok(());
+    }
+    // Name the Space, then prove we hold its group key, before requesting any bytes
+    // (the dispatcher routes on the SpaceId and gates on the key; an unauthenticated
+    // peer — or one naming the wrong Space — is served nothing).
+    {
+        let (mut a_send, mut a_recv) = conn.open_bi().await.context("open blob auth stream")?;
+        a_send
+            .write_all(space_id.as_bytes())
+            .await
+            .context("send space id")?;
+        crate::auth::initiator(group_key, &mut a_send, &mut a_recv)
+            .await
+            .context("blob group authentication")?;
+        let _ = a_send.finish();
+    }
+    let route_conn = conn.clone(); // route can upgrade relay→direct mid-transfer
+    let get = store.remote().execute_get(conn, local.missing());
+    let mut stream = get.stream();
+    loop {
+        match tokio::time::timeout(STALL_TIMEOUT, stream.next()).await {
+            Err(_) => return Err(CoreError::Sync("download stalled".into())),
+            Ok(None) => break,
+            Ok(Some(GetProgressItem::Done(_))) => break,
+            Ok(Some(GetProgressItem::Error(e))) => {
+                return Err(CoreError::Sync(format!("download failed: {e}")))
+            }
+            Ok(Some(GetProgressItem::Progress(offset))) => {
+                on_progress(offset, conn_is_relayed(&route_conn));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether the blob is already fully present in the local store (no network).
+pub async fn is_local_complete(store: &FsStore, hash: Hash) -> bool {
+    store
+        .remote()
+        .local(HashAndFormat::raw(hash))
+        .await
+        .map(|l| l.is_complete())
+        .unwrap_or(false)
+}
+
+/// Read `[start, end)` bytes of a LOCALLY-complete blob into memory (BLAKE3-verified).
+/// The caller bounds the window, so this never loads an unbounded blob; ensure the blob
+/// is local first (e.g. via [`ensure_local`]).
+pub async fn read_range(store: &FsStore, hash: Hash, start: u64, end: u64) -> Result<Vec<u8>> {
+    if end <= start {
+        return Ok(Vec::new());
+    }
+    store
+        .export_ranges(hash, start..end)
+        .concatenate()
+        .await
+        .map_err(|e| CoreError::Sync(format!("read blob range: {e}")))
 }
 
 /// Whether the connection's active path currently runs through the relay (vs. a
