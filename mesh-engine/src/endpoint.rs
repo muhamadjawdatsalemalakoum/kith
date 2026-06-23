@@ -11,6 +11,25 @@ use crate::config::Infra;
 use crate::error::Result;
 use crate::MESH_ALPN;
 
+/// QUIC transport tuned for bulk blob transfer: large per-stream and per-connection receive
+/// windows (and send window) so a single stream isn't flow-control-limited on a fat, latent
+/// pipe — the dominant cause of the ~1%-of-LAN throughput in n0-computer/iroh#4286 (the
+/// default `stream_receive_window` is far below the bandwidth-delay product of a real link).
+///
+/// We do NOT switch the congestion controller to BBR here: iroh re-exports the
+/// `ControllerFactory` trait but not a concrete BBR config, so selecting BBR would require
+/// depending on iroh's internal `noq_proto` fork pinned to its exact version (fragile). See
+/// `docs/throughput.md`. The window tuning captures the bulk of the single-stream win;
+/// multi-stream range fetch ([`crate::blobs::ensure_local_multi`]) adds parallelism on top.
+fn tuned_transport() -> iroh::endpoint::QuicTransportConfig {
+    use iroh::endpoint::{QuicTransportConfig, VarInt};
+    QuicTransportConfig::builder()
+        .stream_receive_window(VarInt::from_u32(16 * 1024 * 1024))
+        .receive_window(VarInt::from_u32(64 * 1024 * 1024))
+        .send_window(64 * 1024 * 1024)
+        .build()
+}
+
 /// Build and bind the single long-lived endpoint for the given infra.
 ///
 /// The endpoint serves and dials [`MESH_ALPN`]. We intentionally do not block on
@@ -51,6 +70,7 @@ pub async fn build(secret_key: SecretKey, infra: &Infra, enable_blobs: bool) -> 
         Infra::N0Default => Endpoint::builder(presets::N0)
             .secret_key(secret_key)
             .alpns(alpns)
+            .transport_config(tuned_transport())
             .bind()
             .await
             .context("bind endpoint (n0 default)")?,

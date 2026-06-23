@@ -200,6 +200,97 @@ pub async fn ensure_local(
     Ok(())
 }
 
+/// Parallel range streams used by a large multi-stream fetch.
+pub const MULTI_STREAMS: usize = 4;
+/// Blobs at least this large take the multi-stream path; smaller ones a single request.
+pub const MULTI_THRESHOLD: u64 = 8 * 1024 * 1024;
+
+/// Fetch a blob of known `size` over up to `streams` concurrent range requests — separate
+/// QUIC streams on one connection — then it is complete in the store. For small blobs (or
+/// `streams <= 1`) this is exactly [`ensure_local`]. Each segment is an independent,
+/// BLAKE3-verified GET; on a fat latent link this parallelism (with the tuned receive
+/// windows) recovers throughput a single stream leaves on the table. No-op if already local.
+pub async fn ensure_local_multi(
+    store: &FsStore,
+    conn: Connection,
+    hash: Hash,
+    size: u64,
+    group_key: &[u8; 32],
+    space_id: &SpaceId,
+    streams: usize,
+) -> Result<()> {
+    use iroh_blobs::protocol::{ChunkRanges, ChunkRangesExt, ChunkRangesSeq, GetRequest};
+
+    if is_local_complete(store, hash).await {
+        return Ok(());
+    }
+    let n = streams.max(1);
+    if n == 1 || size < MULTI_THRESHOLD {
+        return ensure_local(store, conn, hash, group_key, space_id, |_, _| {}).await;
+    }
+    // Authenticate once (SpaceId + group key) before opening any request streams.
+    {
+        let (mut s, mut r) = conn.open_bi().await.context("open blob auth stream")?;
+        s.write_all(space_id.as_bytes())
+            .await
+            .context("send space id")?;
+        crate::auth::initiator(group_key, &mut s, &mut r)
+            .await
+            .context("blob group authentication")?;
+        let _ = s.finish();
+    }
+    let seg = size.div_ceil(n as u64).max(1);
+    let mut set = tokio::task::JoinSet::new();
+    for i in 0..n as u64 {
+        let start = i * seg;
+        if start >= size {
+            break;
+        }
+        let end = (start + seg).min(size);
+        let req = GetRequest {
+            hash,
+            ranges: ChunkRangesSeq::from_ranges([ChunkRanges::bytes(start..end)]),
+        };
+        let store = store.clone();
+        let conn = conn.clone();
+        set.spawn(async move {
+            let get = store.remote().execute_get(conn, req);
+            let mut stream = get.stream();
+            loop {
+                match tokio::time::timeout(STALL_TIMEOUT, stream.next()).await {
+                    Err(_) => return Err(CoreError::Sync("download stalled".into())),
+                    Ok(None) | Ok(Some(GetProgressItem::Done(_))) => break,
+                    Ok(Some(GetProgressItem::Error(e))) => {
+                        return Err(CoreError::Sync(format!("download failed: {e}")))
+                    }
+                    Ok(Some(GetProgressItem::Progress(_))) => {}
+                }
+            }
+            Ok::<(), CoreError>(())
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        joined.map_err(|e| CoreError::Sync(format!("multi-stream task: {e}")))??;
+    }
+    if !is_local_complete(store, hash).await {
+        return Err(CoreError::Sync("multi-stream fetch left gaps".into()));
+    }
+    Ok(())
+}
+
+/// Export a locally-complete blob to `dest` (the write-out half of a fetch).
+pub async fn export_path(store: &FsStore, hash: Hash, dest: &Path) -> Result<()> {
+    store
+        .export_with_opts(ExportOptions {
+            hash,
+            target: dest.to_path_buf(),
+            mode: ExportMode::Copy,
+        })
+        .await
+        .with_context(|| format!("export to {}", dest.display()))?;
+    Ok(())
+}
+
 /// Read every complete blob in the store as raw bytes — for an encrypted Space export
 /// (the on-disk store files are locked while open and aren't portable, so we export the
 /// content itself, which re-imports to the identical content-addressed hashes).

@@ -270,8 +270,22 @@ self-hosted relay; under `test-utils` the arm trusts the in-process relay so it 
   `space_export_import_roundtrip`, `space_export_import_preserves_blobs`,
   `import_with_wrong_passphrase_fails`.
 
-> Later (not yet in this pass): multi-stream throughput + a measured benchmark (EV2-M8),
-> and wiring every capability through the desktop GUI (EV2-M10).
+### EV2-M8 — Throughput, multi-stream & measurement · ✅ DONE
+- **Transport tuning** (the dominant fix): the endpoint sets large QUIC windows
+  (`stream_receive_window` 16 MiB, `receive_window`/`send_window` 64 MiB) so a single stream
+  isn't flow-control-limited on a fat, latent link — the cause of the ~1%-of-LAN throughput
+  in iroh#4286. **BBR** is not applied (iroh re-exports the `ControllerFactory` trait but not
+  a concrete BBR config; selecting it needs an internal `noq_proto` pin — documented blocker).
+- **Multi-stream fetch:** `blobs::ensure_local_multi` / `Mesh::fetch_file_multi` fetch a large
+  blob over N concurrent BLAKE3-verified range streams. Measurably faster even on loopback
+  (parallel verification): ~93 vs ~77 MB/s for 64 MiB.
+- **Benchmark + resume:** a measurement harness records sustained MB/s to a results file;
+  resume is verified after a mid-transfer interrupt.
+- **Docs:** `docs/throughput.md` (methodology, numbers, the BBR blocker, CGNAT/symmetric-NAT
+  notes). Tests: `large_blob_resumes_after_interrupt`, `multistream_faster_than_singlestream`,
+  `benchmark_records_throughput`.
+
+> Later (not yet in this pass): wiring every capability through the desktop GUI (EV2-M10).
 
 ---
 

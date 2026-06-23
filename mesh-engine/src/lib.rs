@@ -791,6 +791,28 @@ impl Mesh {
         .await
     }
 
+    /// BLOB PRIMITIVE — fetch a large blob of known `size` over several parallel range
+    /// streams (higher throughput on latent links; see [`blobs::ensure_local_multi`]),
+    /// writing it to `dest`. Resumes from partial data; BLAKE3-verified end to end.
+    pub async fn fetch_file_multi(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        hash: Hash,
+        size: u64,
+        dest: &Path,
+    ) -> Result<()> {
+        fetch_multi_for_space(
+            &self.inner,
+            &self.active_state(),
+            peer.into(),
+            hash,
+            size,
+            dest,
+            blobs::MULTI_STREAMS,
+        )
+        .await
+    }
+
     /// BLOB PRIMITIVE — read `[start, end)` bytes of `hash` from the active Space,
     /// fetching the blob from `peer` first if it isn't already local. Backs `files.read`
     /// so an agent reads file contents across devices without writing to a user path.
@@ -1132,6 +1154,35 @@ async fn read_for_space(
         .await?;
     }
     blobs::read_range(space.store(), hash, start, end).await
+}
+
+/// Multi-stream variant of [`fetch_for_space`]: fetch a large blob of known `size` over
+/// several concurrent range streams, then export to `dest`.
+async fn fetch_multi_for_space(
+    inner: &Arc<Inner>,
+    space: &Arc<SpaceState>,
+    peer: EndpointAddr,
+    hash: Hash,
+    size: u64,
+    dest: &Path,
+    streams: usize,
+) -> Result<()> {
+    let connect = inner.router.endpoint().connect(peer, iroh_blobs::ALPN);
+    let conn = tokio::time::timeout(CONNECT_TIMEOUT, connect)
+        .await
+        .map_err(|_| CoreError::Unreachable("connect timed out".into()))?
+        .map_err(|e| CoreError::Unreachable(e.to_string()))?;
+    blobs::ensure_local_multi(
+        space.store(),
+        conn,
+        hash,
+        size,
+        &space.group_key(),
+        &space.id(),
+        streams,
+    )
+    .await?;
+    blobs::export_path(space.store(), hash, dest).await
 }
 
 /// Migrate a pre-Spaces flat data directory (`data_dir/{doc.automerge,group.key,
