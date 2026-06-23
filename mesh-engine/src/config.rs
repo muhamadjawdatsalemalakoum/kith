@@ -27,8 +27,9 @@ pub struct CoreConfig {
     /// `None` loads/generates one in the data dir; devices in the same group hold the
     /// same key (established by pairing, or set explicitly here for tests).
     pub group_key: Option<[u8; 32]>,
-    /// Serve the content/blob primitive. OFF by default — blob serving is not yet
-    /// access-gated, so only enable it among trusted peers / on trusted networks.
+    /// Serve the content/blob primitive. OFF by default to minimise attack surface;
+    /// when enabled, blob serving is access-gated exactly like document sync (SpaceId
+    /// routing + group-key handshake + EndpointId membership gate before any byte).
     pub enable_blobs: bool,
     /// Where at-rest / group keys live (file by default; OS keychain when opted in).
     pub key_store: KeyStore,

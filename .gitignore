@@ -18,3 +18,13 @@ Thumbs.db
 
 # local screenshot scratch
 .shots/
+
+# Local strategy / due-diligence / launch docs — internal only, never publish
+/docs/Kith-*.md
+/docs/Kith-*.pdf
+/docs/IMPLEMENTATION-BRIEF.md
+/docs/_md2pdf.py
+/docs/LAUNCH.md
+
+# Editor / local run configs
+/.claude/
