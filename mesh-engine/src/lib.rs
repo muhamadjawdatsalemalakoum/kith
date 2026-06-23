@@ -115,6 +115,10 @@ struct Inner {
 #[derive(Clone)]
 pub struct Mesh {
     inner: Arc<Inner>,
+    /// When `Some`, this handle's active-Space methods address exactly this Space and
+    /// ignore [`Mesh::set_active_space`] — the structural binding behind an MCP server
+    /// pinned to one Space ([`Mesh::bound_to`]). `None` follows the shared active Space.
+    active_override: Option<SpaceId>,
 }
 
 impl Mesh {
@@ -218,7 +222,10 @@ impl Mesh {
         });
 
         tokio::spawn(sync_loop(inner.clone()));
-        Ok(Mesh { inner })
+        Ok(Mesh {
+            inner,
+            active_override: None,
+        })
     }
 
     // ---- device-global handles (one endpoint / identity across all Spaces) ----
@@ -327,19 +334,42 @@ impl Mesh {
         self.inner.registry.infos()
     }
 
-    /// The Space the bare [`Mesh`] methods currently operate on.
+    /// The Space the bare [`Mesh`] methods currently operate on (the bound Space if this
+    /// handle is [`Mesh::bound_to`] one, else the shared active Space).
     pub fn active_space(&self) -> SpaceId {
-        *self.inner.active.lock().expect("active lock")
+        self.active_override
+            .unwrap_or_else(|| *self.inner.active.lock().expect("active lock"))
     }
 
     /// Point the bare [`Mesh`] methods at a different Space. Returns whether the Space
-    /// exists (no-op if it doesn't).
+    /// exists (no-op if it doesn't). No effect on a [`Mesh::bound_to`] handle, which is
+    /// pinned for an MCP server's lifetime.
     pub fn set_active_space(&self, id: SpaceId) -> bool {
-        if !self.inner.registry.contains(&id) {
+        if self.active_override.is_some() || !self.inner.registry.contains(&id) {
             return false;
         }
         *self.inner.active.lock().expect("active lock") = id;
         true
+    }
+
+    /// A handle **bound** to one Space for an MCP server's lifetime: its active-Space
+    /// methods always address `id` and ignore [`Mesh::set_active_space`]. Combined with
+    /// the fact that no MCP tool accepts a Space argument, a prompt-injected agent is
+    /// structurally unable to reach another Space (the confused-deputy / wrong-tenant
+    /// failure mode). `None` if `id` isn't a joined Space.
+    pub fn bound_to(&self, id: SpaceId) -> Option<Mesh> {
+        if !self.inner.registry.contains(&id) {
+            return None;
+        }
+        Some(Mesh {
+            inner: self.inner.clone(),
+            active_override: Some(id),
+        })
+    }
+
+    /// Whether this handle is bound to a single Space (an MCP server handle).
+    pub fn is_bound(&self) -> bool {
+        self.active_override.is_some()
     }
 
     /// A scoped handle to one Space, for code that addresses a Space explicitly (the
@@ -518,9 +548,10 @@ impl Mesh {
         self.inner.data_dir.join("spaces").join(id.to_hex())
     }
 
-    /// The active Space's state (the default Space is always present as a fallback).
+    /// The active Space's state — the bound Space for a [`Mesh::bound_to`] handle, else
+    /// the shared active Space (the default Space is always present as a fallback).
     fn active_state(&self) -> Arc<SpaceState> {
-        let id = *self.inner.active.lock().expect("active lock");
+        let id = self.active_space();
         self.inner
             .registry
             .get(&id)

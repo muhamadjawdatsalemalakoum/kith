@@ -17,7 +17,7 @@ use std::time::Duration;
 use agent_memory::{Entry, Memory};
 use centraltabs::{Tab, Tabs};
 use kith_files::Files;
-use mesh_engine::{endpoint_addr_from_id, CoreConfig, Mesh};
+use mesh_engine::{endpoint_addr_from_id, CoreConfig, Mesh, SpaceId};
 use mesh_mcp::McpApp;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -998,7 +998,11 @@ fn start_mcp_bridge(holder: MeshHolder, data_dir: PathBuf) {
                         None => return,
                     }
                 };
-                let _ = mesh_mcp::serve_stream(kith_app(&mesh), reader, w).await;
+                // Bind this MCP connection to the GUI's active Space (the human's
+                // selection) for its lifetime — no tool can address another Space.
+                let active = mesh.active_space();
+                let bound = mesh.bound_to(active).unwrap_or(mesh);
+                let _ = mesh_mcp::serve_stream(kith_app(&bound), reader, w).await;
             });
         }
     });
@@ -1033,6 +1037,39 @@ async fn proxy_to_running(data_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The Space id the human asked this MCP server to bind to, from `kith serve --space <id>`
+/// or the `KITH_SPACE` env var. `None` means bind to the default Space.
+fn requested_space() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(p) = args.iter().position(|a| a == "--space") {
+        if let Some(v) = args.get(p + 1) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    std::env::var("KITH_SPACE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Resolve the Space an MCP server binds to and return a handle PINNED to it for the
+/// process's lifetime. Falls back to the default Space (logging) if none/unknown is given.
+fn bind_app_mesh(mesh: &Mesh) -> Mesh {
+    match requested_space() {
+        Some(s) => match SpaceId::parse(&s).and_then(|id| mesh.bound_to(id)) {
+            Some(m) => m,
+            None => {
+                eprintln!("kith serve: unknown --space '{s}', serving the default space");
+                mesh.clone()
+            }
+        },
+        None => mesh.clone(),
+    }
+}
+
 /// Headless mode (`kith serve`): expose the unified MCP server over stdio for an MCP
 /// client like Claude Desktop. If this process can own the engine, it serves directly;
 /// if the GUI already owns it, it transparently bridges to the GUI's engine so the two
@@ -1058,12 +1095,18 @@ pub fn serve() {
                         mesh.add_peer(addr).await;
                     }
                 }
+                // Bind this MCP server to exactly ONE Space, chosen by the human out of
+                // band (`--space <id>` / `KITH_SPACE`), else the default Space. The bound
+                // handle ignores active-Space changes and no tool takes a Space argument,
+                // so a prompt-injected agent cannot reach another Space (confused-deputy).
+                let app_mesh = bind_app_mesh(&mesh);
                 eprintln!(
-                    "kith MCP server ready (device {}, data {})",
+                    "kith MCP server ready (device {}, space {}, data {})",
                     mesh.endpoint_id(),
+                    app_mesh.active_space().to_hex(),
                     data_dir.display()
                 );
-                if let Err(e) = mesh_mcp::serve_stdio(kith_app(&mesh)).await {
+                if let Err(e) = mesh_mcp::serve_stdio(kith_app(&app_mesh)).await {
                     eprintln!("kith serve: {e}");
                 }
             }
@@ -1222,5 +1265,85 @@ mod tests {
             .call_tool("bogus.thing", serde_json::json!({}))
             .await
             .is_err());
+    }
+
+    /// An MCP server built over a bound handle addresses exactly one Space and ignores
+    /// active-Space changes (M6 — the structural binding).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_server_bound_to_one_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let mesh = Mesh::start(CoreConfig::local_only(dir.path()).with_blobs(true))
+            .await
+            .unwrap();
+        let other = mesh.create_space("client-b").await.unwrap();
+        let bound = mesh.bound_to(other).expect("space exists");
+        assert!(bound.is_bound());
+        assert_eq!(bound.active_space(), other);
+
+        // Changing the shared active Space does NOT move the bound handle.
+        assert!(mesh.set_active_space(SpaceId::default_space()));
+        assert_eq!(
+            bound.active_space(),
+            other,
+            "a bound MCP handle ignores active-Space changes"
+        );
+        // The bound handle itself refuses to switch.
+        assert!(!bound.set_active_space(SpaceId::default_space()));
+        assert_eq!(bound.active_space(), other);
+    }
+
+    /// No MCP tool exposes a Space argument — an agent has no way to name another Space.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_has_no_cross_space_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        let mesh = Mesh::start(CoreConfig::local_only(dir.path()).with_blobs(true))
+            .await
+            .unwrap();
+        for t in kith_app(&mesh).tools() {
+            if let Some(props) = t.input_schema.get("properties").and_then(|p| p.as_object()) {
+                for key in props.keys() {
+                    assert!(
+                        !key.to_lowercase().contains("space"),
+                        "tool {} exposes a Space argument '{}'",
+                        t.name,
+                        key
+                    );
+                }
+            }
+        }
+    }
+
+    /// An agent's writes land ONLY in the bound Space, never the default Space.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_writes_land_only_in_bound_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let mesh = Mesh::start(CoreConfig::local_only(dir.path()).with_blobs(true))
+            .await
+            .unwrap();
+        let client = mesh.create_space("client-a").await.unwrap();
+
+        // The MCP app is bound to `client`; an agent appends a memory through it.
+        let app = kith_app(&mesh.bound_to(client).unwrap());
+        app.call_tool(
+            "memory.append",
+            serde_json::json!({ "text": "client-a secret", "kind": "fact" }),
+        )
+        .await
+        .unwrap();
+
+        // It is present in the bound Space…
+        let in_bound = Memory::from_mesh(mesh.bound_to(client).unwrap())
+            .all()
+            .await;
+        assert!(
+            in_bound.iter().any(|e| e.text == "client-a secret"),
+            "write landed in the bound Space"
+        );
+        // …and absent from the default Space (no cross-space leak).
+        let in_default = Memory::from_mesh(mesh.clone()).all().await;
+        assert!(
+            in_default.iter().all(|e| e.text != "client-a secret"),
+            "write did not leak into the default Space"
+        );
     }
 }

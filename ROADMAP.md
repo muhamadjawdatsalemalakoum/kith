@@ -226,10 +226,29 @@ it at the gate) **and** the Space's **epoch key rotates**.
   `remaining_members_get_new_key_and_converge`, `at_rest_reencrypted_under_new_epoch`,
   `audit_log_hash_chain_detects_tampering`.
 
-> Later (not in the current substrate pass): `files.read` (EV2-M4), self-hosted relay
-> (EV2-M5), MCP per-Space binding (EV2-M6), keychain + encrypted export/recovery
-> (EV2-M7), multi-stream throughput + a measured benchmark (EV2-M8), and wiring every
-> capability through the desktop GUI (EV2-M10).
+### EV2-M4 — `files.read` / `files.search` · ✅ DONE
+Agents read file CONTENTS across devices. The blob primitive gains read-into-memory
+(`blobs::ensure_local` + `read_range` + `is_local_complete`; `Mesh`/`SpaceHandle::read_file`
+fetch-if-missing then return a bounded `[start,end)` window). `kith-files` gains
+`read(id, offset, max_len) -> FileContent` (content-addressed → no path-traversal surface;
+UTF-8 vs base64 sniff; 256 KiB per-read cap with `offset`/`eof` pagination) + `search`
+(over names). MCP: `files.read`, `files.search`. Tests:
+`files_read_returns_contents_cross_device`, `files_read_large_file_chunked`,
+`reader_role_can_read_writer_can_share`, `files_read_path_traversal_rejected`,
+`read_binary_is_base64`, `agent_reads_and_searches_over_mcp`.
+
+### EV2-M6 — MCP per-Space binding (confused-deputy safety) · ✅ DONE
+An MCP server is bound to exactly ONE Space, chosen by the HUMAN out of band:
+`kith serve --space <id>` / `KITH_SPACE`, or the GUI's active-Space selection (the bridge
+binds each connection to it). `Mesh::bound_to(id)` returns a handle whose active-Space
+methods are PINNED and ignore `set_active_space`; **no MCP tool accepts a Space argument**,
+so a prompt-injected agent is structurally unable to cross Spaces. Tests:
+`mcp_server_bound_to_one_space`, `mcp_has_no_cross_space_argument`,
+`agent_writes_land_only_in_bound_space`.
+
+> Later (not yet in this pass): self-hosted relay (EV2-M5), keychain + encrypted
+> export/recovery (EV2-M7), multi-stream throughput + a measured benchmark (EV2-M8), and
+> wiring every capability through the desktop GUI (EV2-M10).
 
 ---
 
