@@ -81,6 +81,8 @@ async function mockInvoke(cmd, args = {}) {
         { name: "files.share", description: "Offer a local file to the user's other devices (returns its id)." },
         { name: "files.list", description: "List files offered across the user's devices." },
         { name: "files.fetch", description: "Download an offered file (by id) into a destination folder." },
+        { name: "files.read", description: "Read the CONTENTS of an offered file by id (fetching it across your devices if needed)." },
+        { name: "files.search", description: "Search offered files by name across your devices." },
       ],
     };
     case "list_files": return demoFiles.slice();

@@ -285,7 +285,20 @@ self-hosted relay; under `test-utils` the arm trusts the in-process relay so it 
   notes). Tests: `large_blob_resumes_after_interrupt`, `multistream_faster_than_singlestream`,
   `benchmark_records_throughput`.
 
-> Later (not yet in this pass): wiring every capability through the desktop GUI (EV2-M10).
+### EV2-M10 — Wire every capability through the desktop GUI · ✅ DONE
+The Tauri app gains a **Spaces** experience (matching the existing rail/sheet/toast design):
+an active-space selector that binds the MCP server, create Personal/Team spaces, switch,
+and leave. Team spaces get a **members + roles** manager (add by device id, promote/demote,
+remove → revoke + rekey) and the **audit log**. Encrypted **export/import** (passphrase +
+native file dialogs) is the move/recovery path. **Settings** gain a **Network** choice
+(Decentralized vs Self-hosted, restarting the engine) and a **key-storage** status line;
+`files.read`/`files.search` appear automatically on the Agents screen. Verified in-browser
+(the demo `mockInvoke` covers every command) with zero console errors.
+
+**Engine-v2 substrate (M1–M8) + GUI (M10): complete.** `cargo test --workspace` + the
+relay-path test green; `clippy --workspace --all-targets -D warnings` and `fmt` clean;
+`#![forbid(unsafe_code)]` intact on every library crate; no `todo!`/`unimplemented!`/stub in
+any shipped path.
 
 ---
 

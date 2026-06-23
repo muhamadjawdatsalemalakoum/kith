@@ -27,9 +27,14 @@ A single desktop app (Windows · macOS · Linux) with:
 - **🔖 Tabs** — save links/pages and have them everywhere.
 - **📁 Files** — send files straight to your own devices: end-to-end encrypted, no size
   limit, no cloud, with live progress and a direct-vs-relayed badge.
+- **🌐 Spaces** — run several independent, end-to-end-encrypted worlds at once: a
+  **Personal** space for yourself, or a **Team** space with per-device roles
+  (Admin / Writer / Reader) for a trusted circle. Each space has its own keys, members,
+  and audit log; export any space to an encrypted file for backup or to move it.
 - **🔗 Devices** — link another computer with a one-time code (SPAKE2). No account.
 - **🤖 Agents** — point Claude Desktop / Cursor at Kith over MCP; your AI can use your
-  memory, tabs, and files locally.
+  memory, tabs, and files locally — bound to the **active space only**, so a
+  prompt-injected agent can't reach another space.
 
 ## Install
 
@@ -71,9 +76,16 @@ runs standalone.
   refused before any byte is exchanged.
 - **No account.** Devices link with a short pairing code (SPAKE2-derived group key);
   pairing is mutual, so both sides learn each other and converge.
-- **Honest serverless.** "No server that can read your data" — not zero-infra: discovery
-  is the public DHT and a relay is used only as a fallback (and it only ever forwards
-  ciphertext). If all your devices are off, updates are *pending, not lost*.
+- **Spaces, roles & revocation.** A device runs N independent encrypted spaces over one
+  connection. A team space roots membership in **device identity (EndpointId), not mere
+  possession of the key**: a signed, hash-chained membership log, with `Admin`/`Writer`/
+  `Reader` roles enforced cryptographically against honest peers (a Reader's writes are
+  rejected; a non-member is refused even with a leaked key). Removing a device rotates an
+  **epoch key** so it can't follow future changes.
+- **Self-hostable.** Ships serverless by default (public DHT + n0's free relays as
+  fallback); run your own relay + discovery for full control (see [`infra/`](infra/)).
+- **Honest serverless.** "No server that can read your data" — not zero-infra: a relay
+  only ever forwards ciphertext. If all your devices are off, updates are *pending, not lost*.
 
 See [docs/PAIRING.md](docs/PAIRING.md) for the link flow and [docs/PRIVACY.md](docs/PRIVACY.md)
 for exactly what is and isn't stored.
@@ -81,9 +93,11 @@ for exactly what is and isn't stored.
 ## Repository layout
 
 ```
-mesh-engine/    the substrate: identity, mainline-DHT discovery, relay fallback,
-                SPAKE2 pairing, group-key-gated CRDT sync + blob transfer, at-rest
-                encryption. The ONLY crate that touches iroh / automerge.
+mesh-engine/    the substrate: per-device identity, mainline-DHT discovery, relay
+                fallback (or self-hosted), SPAKE2 pairing, N isolated encrypted Spaces,
+                EndpointId membership + signed roles, epoch-key revocation + audit log,
+                CRDT sync + multi-stream blob transfer, keychain keys + encrypted
+                export. The ONLY crate that touches iroh / automerge.
 mesh-mcp/       a tiny MCP host — implement one trait and an app's data + actions
                 become readable/writable by any AI agent, with no server in the loop.
 apps/memory/    agent-memory: portable, vendor-neutral memory (the memory schema).
@@ -101,20 +115,38 @@ pairing, one replica). See [ROADMAP.md](ROADMAP.md) for invariants and what's ne
 Enforced today, each with tests:
 
 - ✅ **Transport** is end-to-end encrypted (iroh QUIC / TLS 1.3).
-- ✅ **Access control on sync AND files** — only peers proving the shared group key
-  (mutual HMAC) may sync state *or* fetch blobs; a non-member is rejected before any data
-  flows. Tests: `wrong_group_key_cannot_sync`, `stranger_cannot_fetch_blob`.
-- ✅ **Account-free, mutual pairing** — a device joins from a short code via SPAKE2 (a
-  wrong code hands out nothing), and the host learns the joiner so both sides converge.
-- ✅ **Encrypted at rest** — the replica is XChaCha20-Poly1305 encrypted on disk.
+- ✅ **Spaces are isolated** — edits in one space never reach another, and a member of one
+  space cannot sync or fetch blobs from another (`two_spaces_isolated`,
+  `cross_space_blob_isolation`).
+- ✅ **Membership rooted in EndpointId + enforced roles** — a team space's signed,
+  hash-chained membership log binds its root Admin to the space id; a non-member is refused
+  even with a leaked group key, and a Reader's writes are rejected by honest peers because
+  every change carries its author's Ed25519 signature (`non_member_endpointid_rejected_even_with_group_key`,
+  `reader_write_rejected`, `membership_change_requires_admin`).
+- ✅ **Revocation via epoch rekey** — removing a device rotates an Admin-signed epoch key
+  distributed only to remaining members, and re-keys at-rest data, giving **post-removal
+  confidentiality for future data** (`revoked_device_cannot_sync_new_epoch`,
+  `remaining_members_get_new_key_and_converge`, `removed_device_cannot_fetch_blob`).
+- ✅ **Tamper-evident audit log** — the hash-chained membership log records the lifecycle
+  and fails to load if altered (`audit_log_hash_chain_detects_tampering`).
+- ✅ **Keys in the OS keychain** (Windows Credential Manager / macOS Keychain; hardened-file
+  fallback on Linux) and an **encrypted, passphrase-protected space export** as the
+  no-account recovery path (`keychain_roundtrip`, `space_export_import_roundtrip`).
+- ✅ **Account-free, mutual pairing** via SPAKE2; the replica is XChaCha20-Poly1305 encrypted
+  at rest.
 
 Honest caveats (the path from alpha to "trust it broadly"):
 
-- The at-rest key currently lives in a `0600` file in the data dir (no permission
-  hardening on Windows yet) — moving it into the OS keychain / a passphrase is planned.
 - The crypto has **not** had an independent audit (and `spake2 0.4` is itself unaudited).
-- Removing a device today stops syncing with it locally, but does not yet rotate the
-  group key (no forward secrecy). Group re-key on leave is planned.
+  No coding pass substitutes for a review before trusting multi-human spaces with sensitive data.
+- Revocation gives post-removal confidentiality for *future* data — it is **not** forward
+  secrecy for data a removed device already synced, and **not** a retroactive wipe.
+- Role enforcement holds against *honest* peers (an honest majority is assumed for liveness);
+  a removed device keeps whatever it already has, and concurrent Admin edits are reconciled
+  by longest-valid-chain, not full group-key agreement.
+- On Linux (no keychain backend compiled) keys fall back to a hardened key file.
+- Throughput is tuned for "good enough + resumable", not FASP/Aspera-class; BBR isn't applied
+  (an upstream limitation — see [`docs/throughput.md`](docs/throughput.md)).
 - Real-NAT hole-punching and live-DHT/relay behavior are verified by hand, not in CI.
 
 See [SECURITY.md](SECURITY.md) to report an issue.
