@@ -1,11 +1,15 @@
 //! Best-effort OS keychain storage for 32-byte keys.
 //!
 //! Native backends on Windows (Credential Manager) and macOS (Keychain) — no C deps. On
-//! Linux there is no backend compiled in (to avoid a libdbus/secret-service build
-//! requirement), so every call here fails and the caller keeps the hardened key *file*.
-//! Used by [`crate::keys::secured_load_or_create`] when [`crate::KeyStore::Keychain`] is
-//! selected. Every function is infallible at the type level (returns `bool`/`Option`) so a
-//! missing or locked keychain degrades to the file fallback instead of bricking startup.
+//! Linux no OS backend is compiled in (to avoid a libdbus/secret-service build
+//! requirement); there `keyring` falls back to an in-memory mock that accepts a write but
+//! does not persist it across handles. So [`store`] verifies every write by reading it
+//! back through a fresh handle and reports failure when it does not round-trip — the
+//! caller then keeps the hardened key *file* (instead of silently losing the key on a
+//! later restart). Used by [`crate::keys::secured_load_or_create`] when
+//! [`crate::KeyStore::Keychain`] is selected. Every function is infallible at the type
+//! level (returns `bool`/`Option`) so a missing or locked keychain degrades to the file
+//! fallback instead of bricking startup.
 
 /// Service name under which Kith stores its keys.
 const SERVICE: &str = "kith";
@@ -13,10 +17,22 @@ const SERVICE: &str = "kith";
 /// Store a 32-byte `key` under `account`. Returns whether it was actually stored (false if
 /// there is no keychain backend or the write failed — the caller then keeps the file).
 pub fn store(account: &str, key: &[u8; 32]) -> bool {
-    match keyring::Entry::new(SERVICE, account) {
-        Ok(entry) => entry.set_secret(key).is_ok(),
-        Err(_) => false,
+    let Ok(entry) = keyring::Entry::new(SERVICE, account) else {
+        return false;
+    };
+    if entry.set_secret(key).is_err() {
+        return false;
     }
+    // Confirm the write actually persisted in a REAL OS backend by reading it back
+    // through a fresh handle. When no OS backend is compiled in (headless Linux),
+    // `keyring`'s in-memory mock accepts the write but does not share it across handles;
+    // counting that as success would silently lose the key on restart. A write that does
+    // not round-trip therefore counts as "no backend" → the caller keeps the key file.
+    if load(account).as_ref() != Some(key) {
+        delete(account);
+        return false;
+    }
+    true
 }
 
 /// Load a 32-byte key for `account`. `None` if absent, no backend, or the wrong length.
