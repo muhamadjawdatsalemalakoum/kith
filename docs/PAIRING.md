@@ -37,6 +37,7 @@ The host answers exactly **one** pairing attempt per code, then disarms.
 - Both devices appear under **Devices**, where you can **rename** or **unlink** them.
 - Linking is one-time; the devices reconnect on their own afterward.
 
-> Alpha note: **Unlink** stops this device from syncing with that one, but does not yet
-> rotate the group key (a removed device still holds the old key until a future group
-> re-key feature lands). See [SECURITY.md](../SECURITY.md).
+> Note: in a **Personal** space, **Unlink** stops this device from syncing with that one;
+> it does not by itself rotate the shared key, so use **Reset & re-key** if you want a
+> removed device fully locked out. A **Team** space has real revocation — removing a device
+> rotates an Admin-signed epoch key so it can't follow future changes. See [SECURITY.md](../SECURITY.md).

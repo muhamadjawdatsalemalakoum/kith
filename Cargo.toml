@@ -6,9 +6,10 @@
 # data-bearing server.
 #
 # Apps are thin and run on the one substrate, the way iroh-blobs/-docs run on iroh:
-#   - apps/tabs       centralTabs (the first app)
-#   - apps/dropwire   Dropwire-on-mesh (next — proves the engine on the BLOB primitive)
-#   - apps/mcp        an MCP app (later)
+#   - apps/memory     agent-memory (the launch wedge — notes/facts over MCP)
+#   - apps/tabs       centralTabs (saved links)
+#   - apps/files      kith-files (E2E file transfer on the blob primitive)
+#   - apps/desktop    kith (the Tauri GUI + unified `kith serve` MCP server)
 [workspace]
 resolver = "2"
 members = ["mesh-engine", "mesh-mcp", "apps/tabs", "apps/memory", "apps/files", "apps/desktop"]

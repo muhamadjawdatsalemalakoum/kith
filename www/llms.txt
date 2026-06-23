@@ -6,9 +6,10 @@
 > use your memory/tabs/files locally. Desktop app for Windows, macOS, and Linux.
 
 ## Key facts
-- Apps: Memory (notes/facts), Tabs (links), Files (E2E file transfer), Devices (pairing), Agents (MCP).
-- Pairing: a short one-time code (SPAKE2); no account. Both sync and file transfer are gated by a mutual group-key proof.
-- MCP: run `kith serve` (the same binary) — tools: memory.append/search/read/forget, tabs.add/list/forget, files.share/list/fetch.
+- Apps: Memory (notes/facts), Tabs (links), Files (E2E file transfer), Spaces (N isolated encrypted worlds; Team spaces add per-device Admin/Writer/Reader roles, epoch-key revocation, and a tamper-evident audit log), Devices (pairing), Agents (MCP).
+- Pairing: a short one-time code (SPAKE2); no account. Sync and file transfer are gated by a mutual group-key proof and, in Team spaces, by EndpointId membership — a non-member is refused even with a leaked key.
+- MCP: run `kith serve` (the same binary, bound to one space) — tools: memory.append/search/read/forget, tabs.add/list/forget, files.share/list/fetch/read/search.
+- Recovery: no account, so back up via an encrypted, passphrase-protected Space export/import. Keys can live in the OS keychain; a self-hosted relay/discovery is optional (Infra::SelfHosted).
 - License: MIT OR Apache-2.0. Status: alpha (not independently audited).
 
 ## Links

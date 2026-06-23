@@ -63,12 +63,14 @@ still honored, so upgrading keeps your synced data.
 
 ## Status / honesty
 
-- ⚠️ **ALPHA (locally tested; not independently audited).** Now enforced: group-key
-  access control (only your paired devices may sync — wrong key rejected), account-free
-  SPAKE2 pairing from a short code, encrypted-at-rest, and key-rotation revocation.
-  Caveats before relying on it: the at-rest key sits in a `0600` file (OS-keystore /
-  passphrase upgrade pending), the crypto has no independent audit, and real-NAT / DHT
-  behavior is hand-tested. See the workspace `ROADMAP.md` (M1.5).
+- ⚠️ **ALPHA (locally tested; not independently audited).** Now enforced: account-free
+  SPAKE2 pairing from a short code, group-key access control, encrypted-at-rest, multiple
+  isolated **Spaces**, and — in Team spaces — EndpointId membership with `Admin`/`Writer`/
+  `Reader` roles plus epoch-key revocation. Keys can live in the OS keychain, and a Space
+  exports to an encrypted, passphrase-protected file (the no-account recovery path).
+  Caveats before relying on it: the crypto has no independent audit, role enforcement holds
+  against honest peers, revocation protects future (not already-synced) data, and real-NAT /
+  DHT behavior is hand-tested. See the workspace `ROADMAP.md` and `SECURITY.md`.
 - Cross-device sync, persistence, and the MCP surface are implemented and tested.
 - **Device pairing has a UI** in the Kith desktop app (Devices → Link a device /
   Enter a code). This crate exposes pairing via the library API; the desktop app drives it.

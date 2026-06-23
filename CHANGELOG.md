@@ -7,7 +7,33 @@ Versioning.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-23
+
 ### Added
+
+- **Spaces** — run N independent, end-to-end-encrypted spaces over one connection and one
+  device identity; switch the active space and Memory/Tabs/Files follow it. Edits in one
+  space never reach another (`two_spaces_isolated`, `cross_space_blob_isolation`).
+- **Per-device roles** — Team spaces root membership in device identity (EndpointId), not
+  mere key possession, with `Admin`/`Writer`/`Reader` roles enforced cryptographically
+  against honest peers: a Reader's writes are rejected and a non-member is refused even with
+  a leaked group key (`reader_write_rejected`, `non_member_endpointid_rejected_even_with_group_key`).
+- **Revocation** — removing a device rotates an Admin-signed **epoch key** distributed only
+  to remaining members and re-keys at-rest data (post-removal confidentiality for *future*
+  data — not forward secrecy, not a retroactive wipe).
+- **Tamper-evident audit log** — a signed, hash-chained per-space membership log that fails
+  to load if altered (`audit_log_hash_chain_detects_tampering`).
+- **`files.read` / `files.search`** — agents read file *contents* across devices (chunked,
+  path-traversal-safe), not just fetch a path.
+- **MCP per-space binding** — each MCP server is bound to exactly one human-selected space;
+  no tool accepts a space argument, so a prompt-injected agent cannot cross spaces.
+- **Self-hosted relay / discovery** (`Infra::SelfHosted`) — run your own relay + pkarr/DNS
+  instead of n0's; deploy configs and a guide in `infra/`.
+- **OS-keychain key storage** (Windows Credential Manager / macOS Keychain; hardened-file
+  fallback on Linux) and **encrypted, passphrase-protected Space export/import** (Argon2id +
+  XChaCha20-Poly1305) — the no-account recovery path.
+- **Throughput** — larger QUIC windows + multi-stream blob fetch + a benchmark/resume
+  harness (see `docs/throughput.md`).
 
 - **Kith desktop app** (`kith`, Tauri v2) for Windows/macOS/Linux, with Memory, Tabs,
   Files, Devices (pairing), and Agents (MCP) surfaces.
@@ -50,5 +76,6 @@ Versioning.
 - Project documentation, dual MIT/Apache-2.0 licensing, contribution guidance,
   security policy, CI, and release packaging workflows.
 
-[Unreleased]: https://github.com/muhamadjawdatsalemalakoum/kith/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/muhamadjawdatsalemalakoum/kith/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/muhamadjawdatsalemalakoum/kith/compare/v0.0.1...v0.1.0
 [0.0.1]: https://github.com/muhamadjawdatsalemalakoum/kith/releases/tag/v0.0.1

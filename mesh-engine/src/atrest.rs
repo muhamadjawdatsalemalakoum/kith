@@ -3,10 +3,12 @@
 //! XChaCha20-Poly1305 AEAD. Output layout: `nonce(24) || ciphertext+tag`. The 24-byte
 //! random nonce makes reuse a non-issue at our save volume.
 //!
-//! NOTE on the key: today the at-rest key lives in a `0600` file in the data dir
-//! (`atrest.key`). That protects the data file alone (a stray copy / partial leak),
-//! but not against an attacker who has the whole directory. Moving the key to an OS
-//! keystore / passphrase is the documented upgrade (see ROADMAP M1.5).
+//! NOTE on the key: with `KeyStore::Keychain` the at-rest / group keys live in the OS
+//! keychain (Windows Credential Manager / macOS Keychain), falling back to a hardened
+//! `0600` file where there is no backend (e.g. headless Linux). For a role-enforced
+//! Space the at-rest key is derived from the current epoch key, so revocation re-keys
+//! the on-disk snapshot. A hardened file still only protects against a stray copy, not
+//! against an attacker who has full read access to the data directory (see `SECURITY.md`).
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
